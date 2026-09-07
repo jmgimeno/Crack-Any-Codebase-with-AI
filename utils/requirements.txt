@@ -8,3 +8,6 @@ pathspec>=0.12
 # anthropic>=0.40.0
 openai>=1.0.0
 # google-genai>=0.3.0
+
+# Load local environment variables from a .env file if it exists.
+python-dotenv>=1.2

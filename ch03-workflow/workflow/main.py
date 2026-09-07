@@ -14,6 +14,9 @@ The --instructions flag swaps the lens (§3.4):
 import argparse, html, os, re
 from markdown_it import MarkdownIt
 from flow import create_tour_flow
+from dotenv import load_dotenv
+
+load_dotenv()  # Load environment variables from .env file
 
 # CommonMark parser. Unlike python-markdown's fenced_code extension, this
 # correctly handles fenced code blocks indented inside list items.
