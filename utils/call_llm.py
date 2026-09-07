@@ -4,6 +4,8 @@ Picks the provider based on which env var is set:
   ANTHROPIC_API_KEY  -> Claude (claude-sonnet-4-6)
   OPENAI_API_KEY     -> OpenAI (gpt-4o)
   GEMINI_API_KEY     -> Gemini (gemini-2.5-flash)
+  OPENAI_LIKE_MODEL -> OpenAI-like (Qwen/Qwen3.6-27b)
+
 
 Override the auto pick with LLM_PROVIDER=anthropic|openai|gemini.
 Override the model with ANTHROPIC_MODEL / OPENAI_MODEL / GEMINI_MODEL.
@@ -36,8 +38,10 @@ def _pick():
         return "openai"
     if os.environ.get("GEMINI_API_KEY"):
         return "gemini"
+    if os.environ.get("OPENAI_LIKE_API_KEY"):
+        return "openai-like"
     raise RuntimeError(
-        "No LLM key set. Export ANTHROPIC_API_KEY or OPENAI_API_KEY or GEMINI_API_KEY."
+        "No LLM key set. Export ANTHROPIC_API_KEY or OPENAI_API_KEY or GEMINI_API_KEY. or OPENAI_LIKE_API_KEY"
     )
 
 
@@ -46,11 +50,12 @@ def _model_for(provider):
     # are cheap to reproduce. Bump to the pro/opus tier if you want the best
     # answers and don't mind the cost.
     #
-    # Override per call with ANTHROPIC_MODEL / OPENAI_MODEL / GEMINI_MODEL.
+    # Override per call with ANTHROPIC_MODEL / OPENAI_MODEL / GEMINI_MODEL / OPENAI_LIKE_MODEL.
     return {
         "anthropic": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
         "openai":    os.environ.get("OPENAI_MODEL", "gpt-5.1"),
         "gemini":    os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+        "openai-like": os.environ.get("OPENAI_LIKE_MODEL", "Qwen/Qwen3.6-27b"),
     }[provider]
 
 
@@ -122,6 +127,18 @@ def call_llm(prompt: str) -> str:
         )
         text = resp.text
 
+    elif provider == "openai-like":
+        from openai import OpenAI
+        base_url = os.environ.get("OPENAI_LIKE_API_BASE_URL", "https://chat.agrospai.udl.cat/openai/")
+        resp = OpenAI(
+            base_url=base_url,
+            api_key=os.environ.get("OPENAI_LIKE_API_KEY")
+        ).chat.completions.create(
+            model=model,
+            max_completion_tokens=max_out,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.choices[0].message.content
     else:
         raise RuntimeError(f"Unknown LLM_PROVIDER={provider!r}")
 
