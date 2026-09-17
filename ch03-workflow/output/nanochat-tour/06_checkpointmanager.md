@@ -138,7 +138,7 @@ In `scripts/base_train.py`, the `save_checkpoint` function is called regularly (
 
 ### Loading Checkpoints
 
-Loading involves reversing this process, carefully re-instating the model and optimizer states. `nanochat` provides a `load_model` utility function that orchestrates this, automatically finding the correct checkpoint files and loading them onto the specified device.
+Loading involves reversing this process, carefully re-instating the model and optimizer states. `nanochat` provides a `load_model_if_needed` utility function that orchestrates this, automatically finding the correct checkpoint files and loading them onto the specified device.
 
 ```python
 # nanochat/checkpoint_manager.py (excerpt)
@@ -176,7 +176,7 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
 
 In distributed training, the `model_state` is only physically present on rank 0's disk. When `load_checkpoint` is called, rank 0 loads the model and then `dist.broadcast_object_list` sends a copy to all other ranks. Each rank, however, directly loads its own sharded `optimizer_state`.
 
-The `load_model` wrapper (not shown here, but defined in the same file) builds the `GPT` model and its tokenizer, then calls `load_checkpoint` to populate them. It also intelligently handles finding the latest step if a specific `step` is not provided.
+The `load_model_if_needed` wrapper (not shown here, but defined in the same file) builds the `GPT` model and its tokenizer, then calls `load_checkpoint` to populate them. It also intelligently handles finding the latest step if a specific `step` is not provided.
 
 In `scripts/base_train.py`, `load_checkpoint` is crucial for resuming interrupted training:
 

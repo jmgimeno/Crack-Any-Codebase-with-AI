@@ -145,6 +145,29 @@ def call_llm(prompt: str) -> str:
     _cache_put(provider, model, prompt, text)
     return text
 
+def load_model_if_needed():
+    import requests
+
+    endpoint = os.environ.get("OPENAI_LIKE_LOAD_MODEL_ENDPOINT", "")
+    if not endpoint:
+        return
+
+    api_key = os.environ.get("OPENAI_LIKE_API_KEY")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model_path": os.environ.get("MODEL_PATH", "unsloth/Qwen3.8-Flash-Next-GGUF"),
+        "max_seq_length": 200_000
+    }
+
+    response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+    response.raise_for_status()  # raises if status is 4xx/5xx
+
+    data = response.json()
+    print(data)
+
 
 def call_image(prompt: str, output_path: str) -> str:
     """Generate an image using Gemini's image model. Saves to output_path. Returns the path.

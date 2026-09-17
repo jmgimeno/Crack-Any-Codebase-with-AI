@@ -5,9 +5,11 @@ pathspec>=0.12
 
 # Install the SDK for whichever provider you set the env var for.
 # Uncomment one (or more):
-# anthropic>=0.40.0
+anthropic>=0.40.0
 openai>=1.0.0
-# google-genai>=0.3.0
+google-genai>=0.3.0
 
 # Load local environment variables from a .env file if it exists.
 python-dotenv>=1.2
+
+requests>=2.34.2

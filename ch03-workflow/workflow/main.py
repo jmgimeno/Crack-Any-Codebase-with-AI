@@ -15,6 +15,7 @@ import argparse, html, os, re
 from markdown_it import MarkdownIt
 from flow import create_tour_flow
 from dotenv import load_dotenv
+from utils.call_llm import load_model_if_needed
 
 load_dotenv()  # Load environment variables from .env file
 
@@ -152,6 +153,8 @@ def main():
     name = os.path.basename(os.path.abspath(args.repo_path).rstrip('/'))
     out = args.out or os.path.join(os.path.dirname(__file__), "..", "output", f"{name}-tour")
     os.makedirs(out, exist_ok=True)
+
+    load_model_if_needed()
 
     shared = {"repo_path": args.repo_path, "instructions": args.instructions}
     create_tour_flow().run(shared)
