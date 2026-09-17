@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>json_call — utils</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; utils tour</a></p>
+<h1>Chapter 4: json_call</h1>
+<p>Sends a prompt to an AI and repeatedly tries to parse the response into clean JSON, adding gentle reminders on retries if the output is incomplete. It works like a quality control inspector who keeps sending back a poorly filled form until every required box is properly checked.</p>
+<p><code>json_call</code> sits on top of <code>[call_llm](02_call_llm.html)</code> and adds a retry loop specifically for structured extraction. LLMs are probabilistic; sometimes they hallucinate a field, truncate the output, or wrap JSON in conversational filler. <code>json_call</code> catches these failures, appends a nudging &quot;tail&quot; to the prompt, and tries again. Because the tail changes the prompt string, it also busts the cache in <code>[call_llm](02_call_llm.html)</code>, ensuring the model generates a fresh response rather than replaying the cached failure.</p>
+<h2>What you will touch in week one</h2>
+<p>You'll spend most of your time inside <code>llm.py</code>, specifically <code>json_call()</code>, <code>parse_json()</code>, and the <code>normalize</code> callbacks you write in your nodes. Your day-to-day will involve:</p>
+<ul>
+<li>Writing <code>normalize</code> functions that validate the shape of extracted JSON and raise <code>KeyError</code> for missing fields, triggering automatic retries.</li>
+<li>Tuning the <code>retries</code> parameter or customizing the retry tail text when <code>[fill](03_fill.html)</code> prompts produce complex schemas that models struggle with.</li>
+<li>Debugging <code>parse_json</code> edge cases where the model returns multiple JSON blocks or markdown artifacts that confuse the decoder.</li>
+<li>Ensuring your nodes handle the case where <code>json_call</code> exhausts retries and raises, falling back gracefully instead of crashing the pipeline.</li>
+</ul>
+<h2>What to avoid</h2>
+<ul>
+<li><strong>Don't remove or staticize the retry tail.</strong> The tail (<code>\n\nReturn COMPLETE JSON... (retry {k})</code>) serves two critical purposes: it nudges the model, and it changes the prompt string to bust the cache in <code>[call_llm](02_call_llm.html)</code>. If you make the tail identical across retries, <code>json_call</code> will loop forever on a cached bad response.</li>
+<li><strong>Don't catch <code>KeyError</code> inside <code>normalize</code>.</strong> <code>json_call</code> relies on <code>KeyError</code> bubbling up to detect missing fields. If you silence it in your normalization logic, the retry loop won't trigger, and you'll get partial data without a second chance to fix it.</li>
+<li><strong>Never mutate the <code>prompt</code> argument inside <code>json_call</code>.</strong> The function appends the tail to a new string; it never modifies the input. If you wrap <code>json_call</code> and mutate the prompt passed in, you may corrupt calls from <code>[OverviewNode](05_overviewnode.html)</code> or other consumers that reuse the same prompt object.</li>
+<li><strong>Don't rely on <code>parse_json</code> for streaming.</strong> <code>json_call</code> waits for the full response before parsing. It is not designed for incremental processing. Use it for batch extraction where the full context is available.</li>
+<li><strong>Avoid passing huge payloads to <code>normalize</code>.</strong> While <code>json_call</code> handles the parsing, your <code>normalize</code> function should be lightweight. Heavy transformations or secondary API calls inside <code>normalize</code> will slow down the retry loop and increase latency on every attempt.</li>
+</ul>
+<h2>Commands you need to know</h2>
+<p>Drop these into your terminal to verify behavior before committing:</p>
+<pre><code class="language-bash"># Smoke test json_call with a simple prompt
+python -c &quot;
+from utils.llm import json_call
+result = json_call(
+    'Reply with JSON: {\&quot;status\&quot;: \&quot;ok\&quot;}',
+    normalize=lambda d: d,
+    retries=2
+)
+print(result)
+&quot;
+
+# Test parse_json robustness against markdown fences
+python -c &quot;
+from utils.llm import parse_json
+# Should extract the object even with surrounding text
+text = 'Here is the data:\n```json\n{\&quot;key\&quot;: \&quot;value\&quot;, \&quot;nested\&quot;: {1}}\n```\nHope this helps!'
+print(parse_json(text))
+&quot;
+
+# Verify cache busting on retries (requires cache enabled)
+# Run this twice; second run should hit cache if no retries occur
+LLM_CACHE=1 python -c &quot;
+from utils.llm import json_call
+import time
+start = time.time()
+try:
+    # This will retry and cache each variation
+    json_call('Give me {bad}', lambda x: x['missing_key'], retries=2)
+except AssertionError:
+    print(f'Failed in {time.time()-start:.2f}s')
+&quot;
+
+# Clear cache to force fresh retries during development
+rm -rf utils/.cache
+
+# Test with cache disabled to see real retry behavior
+LLM_CACHE=0 python -c &quot;
+from utils.llm import json_call
+try:
+    json_call('Return JSON', lambda d: d['x'], retries=3)
+except AssertionError as e:
+    print(e)
+&quot;
+</code></pre>
+<h2>Conventions that will trip you up</h2>
+<ul>
+<li><strong><code>parse_json</code> returns the <em>first</em> complete JSON value.</strong> It uses <code>json.JSONDecoder().raw_decode()</code> which stops at the first valid object. If the model outputs multiple JSON blocks, <code>parse_json</code> grabs the first one and ignores the rest. Your <code>normalize</code> function must handle this; it won't see subsequent blocks.</li>
+<li><strong>Retry tails affect cache keys.</strong> Every retry appends a unique suffix including the retry count. This means a successful extraction on retry 2 creates a cache entry for <code>prompt + tail2</code>. If you later run with <code>retries=1</code>, you'll miss that cache. This is intentional; the cache key includes the retry state to ensure consistency.</li>
+<li><strong><code>normalize</code> is your contract with the node.</strong> <code>json_call</code> doesn't know what your data should look like. The <code>normalize</code> function defines the schema validation. If <code>normalize</code> succeeds, the data is good. If it raises, <code>json_call</code> retries. Use this to enforce strict typing or required keys.</li>
+<li><strong>Network errors are not caught.</strong> <code>json_call</code> only catches parsing and normalization errors. Network timeouts, rate limits, and API failures bubble up to the node level. Rely on the node's <code>max_retries</code> and <code>wait</code> parameters for transient infrastructure issues.</li>
+<li><strong>Prompts must request JSON explicitly.</strong> <code>json_call</code> doesn't inject instructions; it assumes the prompt already asks for JSON. Always use <code>[fill](03_fill.html)</code> to include JSON schema examples or explicit instructions in the prompt before passing it to <code>json_call</code>.</li>
+</ul>
+<h2>Who to ask</h2>
+<ul>
+<li><strong>JSON schema design &amp; model compliance:</strong> Ping <code>@prompt-engineering</code>. They know which models reliably output nested JSON and how to structure prompts to minimize retry rates.</li>
+<li><strong>Parser bugs &amp; <code>raw_decode</code> behavior:</strong> Ask <code>@tooling-llm</code>. They maintain <code>parse_json</code> and can help debug edge cases where models return malformed or truncated JSON.</li>
+<li><strong>Retry logic &amp; cache interaction:</strong> Loop in <code>@infrastructure</code>. They understand the cache key contract and can advise if your retry tails are causing unexpected cache fragmentation.</li>
+<li><strong>Node integration:</strong> If <code>json_call</code> failures are breaking <code>[OverviewNode](05_overviewnode.html)</code> or downstream flows, check with <code>@prompt-engineering</code> to ensure your normalization logic aligns with the expected data shape.</li>
+</ul>
+<h2>Your first ticket</h2>
+<p><strong>Title:</strong> Add context-aware retry tails for missing keys<br />
+<strong>Scope:</strong> Update <code>json_call</code> to inspect <code>KeyError</code> exceptions and include the missing key name in the retry tail. For example, if <code>normalize</code> raises <code>KeyError: 'author'</code>, the retry tail should become <code>\n\nReturn COMPLETE JSON with every required top-level field. Specifically, include the missing key: author. (retry {k})</code>. This helps the model fix specific omissions rather than guessing what was wrong. Implement this in <code>llm.py</code>, update the docstring, and write a test that verifies the tail includes the key name when a <code>KeyError</code> occurs.<br />
+<strong>Risk:</strong> Low. The change only affects the retry tail string, which is already designed to vary. It improves the signal sent to the model and does not alter cache keys beyond the existing retry count variation. No downstream contracts are affected.<br />
+<strong>Deadline:</strong> Ship by Friday. Once merged, you'll have enhanced the resilience of our structured extraction, learned how retry tails interact with cache keys, and seen exactly how <code>json_call</code> turns parser failures into actionable feedback. Next week, you'll step into <code>[OverviewNode](05_overviewnode.html)</code> to see how these structured results power the final documentation.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="03_fill.html">&larr; fill</a></span>
+    <span><a href="05_overviewnode.html">OverviewNode &rarr;</a></span>
+  </nav>
+</body>
+</html>

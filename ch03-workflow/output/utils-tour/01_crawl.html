@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>crawl — utils</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; utils tour</a></p>
+<h1>Chapter 1: crawl</h1>
+<p>Walks through a project folder, filters out noise like tests and build files, and stitches all relevant code into one readable text block. Think of it as a careful librarian who only pulls the essential books from a massive archive and binds them into a single volume for quick review. This module (<code>[crawl](01_crawl.html)</code>) is the foundation of our ingestion pipeline.</p>
+<h2>What you will touch in week one</h2>
+<p>You’ll spend most of your time inside <code>crawl.py</code>, specifically the three <code>DEFAULT_*</code> frozensets and the <code>crawl()</code> entry point. Your day-to-day will involve:</p>
+<ul>
+<li>Adjusting <code>DEFAULT_KEEP_EXT</code> or <code>DEFAULT_KEEP_NAMES</code> when the team adds support for a new language, framework, or build tool.</li>
+<li>Tuning <code>DEFAULT_SKIP_DIR</code> to prune new vendor directories or framework-specific caches that aren’t yet covered.</li>
+<li>Inspecting the raw output format to ensure it plays nicely with downstream consumers like <code>[call_llm](02_call_llm.html)</code> and <code>[fill](03_fill.html)</code>.</li>
+</ul>
+<h2>What to avoid</h2>
+<ul>
+<li><strong>Do not rewrite <code>safe_read()</code> error handling.</strong> The bare <code>try/except</code> for <code>UnicodeDecodeError</code> and <code>PermissionError</code> is intentional. A single corrupted asset or restrictive permission should never abort a walk over 10,000 files.</li>
+<li><strong>Don’t mutate the <code>frozenset</code> constants.</strong> They are immutable by design. If you need repo-specific overrides, pass them as kwargs to <code>list_files()</code> or <code>crawl()</code> instead of patching the module globals.</li>
+<li><strong>Leave <code>pathspec</code> alone.</strong> The <code>.gitignore</code>-style pattern matching in <code>list_files()</code> relies on <code>pathspec.GitIgnoreSpec</code>. Swapping it for <code>fnmatch</code> or <code>glob</code> breaks relative-path resolution and the <code>include</code>/<code>exclude</code> contract that later chapters depend on.</li>
+</ul>
+<h2>Commands you need to know</h2>
+<p>Drop these into your terminal to verify behavior before committing:</p>
+<pre><code class="language-bash"># Quick sanity check: print the first 1000 chars of a crawl run
+python -c &quot;from utils.crawl import crawl; print(crawl('.')[:1000])&quot;
+
+# Inspect which files would be kept without reading disk I/O
+python -c &quot;from utils.crawl import list_files; print(len(list_files('.')))&quot;
+
+# Dry-run with custom filters (e.g., only TypeScript, skip examples)
+python -c &quot;
+from utils.crawl import crawl
+out = crawl('.', keep_ext={'.ts', '.tsx'}, skip_dirs=frozenset(['examples', 'node_modules']))
+print(f'Bytes: {len(out)}')
+&quot;
+
+# Clear LLM cache if you're testing downstream [json_call](04_json_call.html) retries
+rm -rf utils/.cache
+</code></pre>
+<h2>Conventions that will trip you up</h2>
+<ul>
+<li><strong>The file header format is strict.</strong> Every kept file is wrapped with exactly:
+<code>{'=' * 60}\nFile: {relative_path}\n{'=' * 60}\n{content}\n</code>
+Downstream parsers in <code>[fill](03_fill.html)</code> and <code>[OverviewNode](05_overviewnode.html)</code> split on this exact delimiter. Changing the number of <code>=</code> signs or the <code>\nFile:</code> prefix will break the entire pipeline.</li>
+<li><strong>Patterns are relative to <code>root</code>.</strong> When you pass <code>include=[&quot;src/**&quot;]</code> or <code>exclude=[&quot;**/*_test.go&quot;]</code>, they are evaluated against <code>os.path.relpath(path, root)</code>. Absolute paths or paths with <code>../</code> will silently fail to match.</li>
+<li><strong>Size caps are silent.</strong> Files over <code>DEFAULT_MAX_FILE_BYTES</code> (500 KB) are dropped without warning. This prevents generated dumps or minified bundles from poisoning the context window. If you need to include a large schema or config, either split it or temporarily override <code>max_file_bytes</code> in your call.</li>
+</ul>
+<h2>Who to ask</h2>
+<ul>
+<li><strong>Filter &amp; extension questions:</strong> Ping the <code>@tooling-llm</code> Slack channel. They maintain the baseline defaults and track which extensions actually appear in production repos.</li>
+<li><strong>Pattern matching &amp; <code>pathspec</code> behavior:</strong> Ask the <code>@infrastructure</code> team. They own the context-window budget and will tell you if your new <code>exclude</code> pattern is saving tokens or accidentally cutting off critical source.</li>
+<li><strong>Downstream integration:</strong> If your change breaks how <code>[call_llm](02_call_llm.html)</code> caches prompts or how <code>[json_call](04_json_call.html)</code> extracts structured data, loop in the <code>@prompt-engineering</code> channel. They know the exact token budgets and parsing edge cases.</li>
+</ul>
+<h2>Your first ticket</h2>
+<p><strong>Title:</strong> Add <code>.zig</code> and <code>.nim</code> extensions to the default crawl filter<br />
+<strong>Scope:</strong> Update <code>DEFAULT_KEEP_EXT</code> in <code>crawl.py</code> to include <code>'.zig'</code> and <code>'.nim'</code>. Write a two-line test that verifies <code>list_files()</code> catches them in a mock directory. Verify that <code>[fill](03_fill.html)</code> still templates the output correctly and that <code>[call_llm](02_call_llm.html)</code> caches the resulting prompt hash without errors.<br />
+<strong>Risk:</strong> Low. Purely additive to an immutable frozenset. No parser changes, no downstream contract shifts.<br />
+<strong>Deadline:</strong> Ship by Friday. Once merged, you’ll have touched the ingestion layer, verified the pipeline, and learned exactly how this repo turns raw code into LLM-ready context. Next week, you’ll step into <code>[call_llm](02_call_llm.html)</code> to see how that text becomes a prompt.</p>
+
+  <nav class="chapter-nav">
+    <span>&nbsp;</span>
+    <span><a href="02_call_llm.html">call_llm &rarr;</a></span>
+  </nav>
+</body>
+</html>

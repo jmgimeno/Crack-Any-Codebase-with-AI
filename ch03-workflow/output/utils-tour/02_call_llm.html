@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>call_llm — utils</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; utils tour</a></p>
+<h1>Chapter 2: call_llm</h1>
+<p>Acts as a universal remote control for different AI models, automatically picking the right provider based on environment variables while saving past answers to disk. It’s like a translation agency that routes your request to the best available translator and keeps a filing cabinet of previous conversations.</p>
+<h2>What you will touch in week one</h2>
+<p>You’ll spend most of your time inside <code>call_llm.py</code>, specifically <code>_pick()</code>, <code>_model_for()</code>, and the cache helpers (<code>_cache_get</code>/<code>_cache_put</code>). Your day-to-day will involve:</p>
+<ul>
+<li>Tweaking <code>LLM_MAX_OUTPUT_TOKENS</code> or per-provider model defaults when <code>[crawl](01_crawl.html)</code> dumps exceed the default context window.</li>
+<li>Verifying cache hit/miss ratios when iterating on prompt templates passed through <code>[fill](03_fill.html)</code>.</li>
+<li>Adding or swapping provider dispatch logic if the team onboards a new inference endpoint.</li>
+<li>Inspecting <code>utils/.cache/</code> to ensure deterministic keys aren't causing stale responses in <code>[json_call](04_json_call.html)</code> or <code>[OverviewNode](05_overviewnode.html)</code>.</li>
+</ul>
+<h2>What to avoid</h2>
+<ul>
+<li><strong>Don’t mutate the cache key format.</strong> The SHA256 hash of <code>provider|model|prompt</code> is the contract that makes <code>[json_call](04_json_call.html)</code> retries cheap. Changing the delimiter or hashing strategy will silently invalidate thousands of cached responses.</li>
+<li><strong>Don’t mix <code>max_tokens</code> and <code>max_completion_tokens</code>.</strong> OpenAI’s GPT-5-class models reject the legacy param; Anthropic and Gemini require it. The provider blocks already split this correctly. Hardcoding one name across the board will crash half your test suite.</li>
+<li><strong>Never hardcode API keys or model names.</strong> Always route through the environment variables. The auto-pick logic in <code>_pick()</code> is the single source of truth for routing.</li>
+<li><strong>Don’t bypass <code>LLM_CACHE=0</code>.</strong> The cache is the only thing keeping local iteration costs near zero. Disabling it for “quick tests” will trigger rate limits and burn through daily budgets.</li>
+</ul>
+<h2>Commands you need to know</h2>
+<p>Drop these into your terminal to verify behavior before committing:</p>
+<pre><code class="language-bash"># Smoke test: verify provider routing and basic cache write
+python -m utils.call_llm
+
+# Clear the on-disk cache (safe, recreates on next run)
+rm -rf utils/.cache
+
+# Run with cache disabled to force live model calls
+LLM_CACHE=0 python -c &quot;from utils.call_llm import call_llm; print(call_llm('Say yes')[:20])&quot;
+
+# Override provider explicitly and check which model gets picked
+LLM_PROVIDER=anthropic python -c &quot;
+from utils.call_llm import _pick, _model_for
+print(f'Provider: {_pick()} | Model: {_model_for(_pick())}')
+&quot;
+
+# Inspect cache size and file count without parsing JSON
+find utils/.cache -type f -name '*.json' | wc -l
+du -sh utils/.cache
+</code></pre>
+<h2>Conventions that will trip you up</h2>
+<ul>
+<li><strong>Cache keys are prompt-strict.</strong> A single trailing space or newline difference in a string passed from <code>[fill](03_fill.html)</code> creates a brand-new cache miss. Always <code>strip()</code> or normalize inputs before calling <code>call_llm()</code>.</li>
+<li><strong>Environment variable precedence is strict.</strong> <code>LLM_PROVIDER</code> overrides everything. If it’s absent, the first available API key wins in this order: Anthropic → OpenAI → Gemini → OpenAI-like. Silent fallbacks cause hard-to-trace cost shifts.</li>
+<li><strong>Output token caps are global by default.</strong> <code>LLM_MAX_OUTPUT_TOKENS</code> defaults to <code>16384</code>. If you pass a massive <code>[crawl](01_crawl.html)</code> dump and the model truncates mid-sentence, <code>[json_call](04_json_call.html)</code> will fail to parse and exhaust retries. Bump the env var per-run rather than patching the default.</li>
+<li><strong><code>call_image()</code> intentionally skips caching.</strong> Images are large, unique per prompt, and stored externally or on-disk via <code>output_path</code>. The cache bypass is deliberate; don’t wrap it in <code>_cache_get</code>/<code>_cache_put</code>.</li>
+<li><strong>OpenAI-like endpoints require a base URL.</strong> <code>OPENAI_LIKE_API_BASE_URL</code> defaults to the internal proxy. If you point it at a public provider without setting it, the SDK will 404 silently until timeout.</li>
+</ul>
+<h2>Who to ask</h2>
+<ul>
+<li><strong>Provider routing &amp; API credentials:</strong> Ping <code>@infrastructure</code>. They manage key rotation, rate limits, and cost dashboards for each model tier.</li>
+<li><strong>Cache behavior &amp; disk I/O:</strong> Ask the <code>@tooling-llm</code> channel. They own the cache lifecycle, eviction strategies, and ensure <code>utils/.cache/</code> doesn’t balloon on CI runners.</li>
+<li><strong>Token budgets &amp; prompt formatting:</strong> Loop in <code>@prompt-engineering</code>. They know exactly how <code>[fill](03_fill.html)</code> templates interact with context windows and why <code>[json_call](04_json_call.html)</code> retries sometimes need a nudged prompt tail.</li>
+</ul>
+<h2>Your first ticket</h2>
+<p><strong>Title:</strong> Add explicit fallback chain for per-provider output token limits<br />
+<strong>Scope:</strong> Extend <code>call_llm()</code> to read <code>ANTHROPIC_MAX_OUTPUT_TOKENS</code>, <code>OPENAI_MAX_OUTPUT_TOKENS</code>, <code>GEMINI_MAX_OUTPUT_TOKENS</code>, and <code>OPENAI_LIKE_MAX_OUTPUT_TOKENS</code> before falling back to the global <code>LLM_MAX_OUTPUT_TOKENS</code>. Update the module docstring with the new variables. Write a two-line test that verifies a per-provider override applies without affecting other branches.<br />
+<strong>Risk:</strong> Low. Backwards-compatible fallback chain. No cache key changes, no parser shifts.<br />
+<strong>Deadline:</strong> Ship by Friday. Once merged, you’ll have touched the routing layer, verified token caps against <code>[crawl](01_crawl.html)</code> outputs, and learned exactly how this repo prevents silent truncation downstream. Next week, you’ll step into <code>[fill](03_fill.html)</code> to see how raw text becomes structured prompts.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="01_crawl.html">&larr; crawl</a></span>
+    <span><a href="03_fill.html">fill &rarr;</a></span>
+  </nav>
+</body>
+</html>

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>fill — utils</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; utils tour</a></p>
+<h1>Chapter 3: fill</h1>
+<p>Safely inserts variables into text templates without breaking existing code examples or formatting that accidentally contain curly braces. Imagine a mail-merge tool specifically designed for developers, where it only replaces carefully labeled placeholders while leaving all other symbols completely untouched.</p>
+<p>This module is the bridge between raw data and LLM prompts. It takes the concatenated source code from <code>[crawl](01_crawl.html)</code> and other context, injects it into prompt templates, and passes the result to <code>[call_llm](02_call_llm.html)</code>. Because our prompts frequently contain JSON schemas, Mermaid diagrams, and code snippets with literal <code>{ }</code>, standard Python formatting would destroy the prompt structure. <code>fill</code> solves this by performing targeted string replacement that respects the integrity of the template.</p>
+<h2>What you will touch in week one</h2>
+<p>You’ll spend most of your time inside <code>llm.py</code>, specifically the <code>fill()</code> function and <code>read_prompt()</code> helper. You'll also be editing prompt templates and the nodes that compose them. Your day-to-day will involve:</p>
+<ul>
+<li>Adding new placeholders to prompts when <code>[OverviewNode](05_overviewnode.html)</code> or <code>[json_call](04_json_call.html)</code> nodes need extra context.</li>
+<li>Verifying that values injected from <code>[crawl](01_crawl.html)</code> (which may contain massive blocks of code with braces) land cleanly inside templates without corrupting JSON examples.</li>
+<li>Debugging prompt templates that fail <code>[call_llm](02_call_llm.html)</code> cache keys due to invisible whitespace or formatting drift introduced during filling.</li>
+<li>Writing tests that assert <code>fill</code> preserves literal braces in complex payloads.</li>
+</ul>
+<h2>What to avoid</h2>
+<ul>
+<li><strong>Never use <code>str.format()</code> or f-strings on prompts.</strong> Prompts contain JSON examples like <code>{ &quot;role&quot;: &quot;user&quot; }</code>. Using <code>.format()</code> will raise <code>KeyError</code> or replace unintended braces. <code>fill</code> is the <em>only</em> allowed interpolation method.</li>
+<li><strong>Don't create overlapping placeholder keys.</strong> <code>fill</code> uses simple <code>str.replace</code>. If a template contains <code>{ctx}</code> and <code>{context}</code>, calling <code>fill(t, ctx=&quot;X&quot;)</code> will turn <code>{context}</code> into <code>Xtext</code>. Keys must be unique and non-prefixing.</li>
+<li><strong>Don't embed placeholder patterns in values.</strong> <code>fill</code> iterates sequentially. If you pass <code>fill(t, code=&quot;{secret}&quot;, secret=&quot;leak&quot;)</code>, the value for <code>code</code> contains <code>{secret}</code>, which will be replaced in the next iteration, resulting in <code>code</code> becoming <code>&quot;leak&quot;</code>. Values must be final strings; they cannot contain <code>{...}</code> patterns matching other keys.</li>
+<li><strong>Don't mutate templates in-place.</strong> <code>fill</code> returns a new string. Modifying the template reference passed to <code>fill</code> can cause shared template objects to become corrupted across concurrent node executions.</li>
+<li><strong>Don't hardcode <code>[crawl](01_crawl.html)</code> output size.</strong> While <code>fill</code> itself doesn't cap size, injecting massive crawls into templates can blow the context window before <code>[call_llm](02_call_llm.html)</code> even sees the prompt. Always summarize or truncate context at the source, not inside <code>fill</code>.</li>
+</ul>
+<h2>Commands you need to know</h2>
+<p>Drop these into your terminal to verify behavior before committing:</p>
+<pre><code class="language-bash"># Verify fill preserves JSON braces in templates
+python -c &quot;
+from utils.llm import fill
+t = 'Example JSON: {data}\nAnother block: { \&quot;key\&quot;: 1 }'
+print(fill(t, data='{\&quot;id\&quot;: 123}'))
+&quot;
+
+# Demonstrate the overlapping key risk (this will corrupt {context})
+python -c &quot;
+from utils.llm import fill
+t = 'Short: {ctx}\nLong: {context}'
+print(fill(t, ctx='X'))  # Output: 'Short: X\nLong: Xtext' &lt;- BROKEN
+&quot;
+
+# Verify value injection safety (values must not contain other keys)
+python -c &quot;
+from utils.llm import fill
+t = 'Code: {code}'
+# This is SAFE: value contains braces but no matching keys
+print(fill(t, code='{print(\&quot;hello\&quot;)}'))  
+&quot;
+
+# Smoke test read_prompt integration
+python -c &quot;
+from utils.llm import read_prompt, fill
+# Assumes a test prompt exists; adjust path if needed
+# print(read_prompt('prompts', 'test.txt'))
+&quot;
+
+# Check how fill interacts with crawl output containing braces
+python -c &quot;
+from utils.crawl import crawl
+from utils.llm import fill
+# Simulate filling crawl output into a template
+code = crawl('.', keep_ext={'README.md'})
+t = 'Context:\n{code}'
+result = fill(t, code=code[:500])
+print(f'Filled length: {len(result)}')
+assert '{' in result and '}' in result, 'Braces should survive fill'
+&quot;
+</code></pre>
+<h2>Conventions that will trip you up</h2>
+<ul>
+<li><strong>Placeholders use single braces <code>{key}</code>.</strong> Unlike Jinja2 or some templating engines, we do not use <code>{{key}}</code>. The prompt files are &quot;clean copies&quot; that developers can read directly. Using <code>{{ }}</code> would render double braces in the final prompt, confusing the LLM.</li>
+<li><strong>Key naming must be unique and isolated.</strong> Never use keys that are substrings of other keys. Good: <code>{code}</code>, <code>{context}</code>, <code>{user_query}</code>. Bad: <code>{code}</code>, <code>{code_snippet}</code>. The team convention is to use distinct words or clear delimiters that don't nest.</li>
+<li><strong>Prompts live in <code>prompts/</code> and are versioned.</strong> Never generate prompt text dynamically in nodes. Always load via <code>read_prompt()</code> and fill via <code>fill()</code>. This ensures prompts are reviewable, cacheable by <code>[call_llm](02_call_llm.html)</code>, and consistent across <code>[json_call](04_json_call.html)</code> retries.</li>
+<li><strong><code>fill</code> does not escape values.</strong> If a value contains newlines, quotes, or special characters, they are injected as-is. It is the caller's responsibility to ensure values are safe for the prompt context. <code>[crawl](01_crawl.html)</code> outputs are raw text; they may contain characters that need sanitization depending on the prompt structure.</li>
+<li><strong>Cache sensitivity.</strong> <code>[call_llm](02_call_llm.html)</code> caches based on the exact prompt string. If <code>fill</code> introduces a trailing newline or variable difference, the cache misses. Always <code>strip()</code> or normalize values before passing to <code>fill</code> to ensure deterministic prompts.</li>
+</ul>
+<h2>Who to ask</h2>
+<ul>
+<li><strong>Prompt design &amp; template structure:</strong> Ping <code>@prompt-engineering</code>. They own the prompt library, define placeholder conventions, and ensure templates interact correctly with model constraints.</li>
+<li><strong>Template bugs &amp; <code>fill</code> behavior:</strong> Ask <code>@tooling-llm</code>. They maintain <code>llm.py</code> and can help debug edge cases like value injection or brace preservation.</li>
+<li><strong>Context integration:</strong> If your prompt uses output from <code>[crawl](01_crawl.html)</code>, loop in <code>@infrastructure</code>. They understand the size and structure of crawl dumps and can advise on truncation or formatting to keep prompts within token budgets.</li>
+<li><strong>Downstream parsing:</strong> If <code>fill</code> output breaks <code>[json_call](04_json_call.html)</code> or <code>[OverviewNode](05_overviewnode.html)</code> parsing, check with <code>@prompt-engineering</code> to ensure the filled prompt still elicits the expected structured response format.</li>
+</ul>
+<h2>Your first ticket</h2>
+<p><strong>Title:</strong> Add <code>detect_fill_collisions()</code> helper to <code>llm.py</code><br />
+<strong>Scope:</strong> Implement a utility function <code>detect_fill_collisions(template: str, keys: dict) -&gt; list[str]</code> that scans a template for all <code>{...}</code> patterns and warns if any key is a substring of another key. For example, if keys contain <code>{'ctx': ..., 'context': ...}</code>, the function should return a warning. Integrate this into a test that validates the existing prompt templates against known keys.<br />
+<strong>Risk:</strong> Low. Purely additive diagnostic tool. No changes to <code>fill</code> logic or downstream contracts. Helps prevent the class of bugs that break <code>[json_call](04_json_call.html)</code> parsing due to corrupted placeholders.<br />
+<strong>Deadline:</strong> Ship by Friday. Once merged, you'll have protected the prompt pipeline from a subtle but critical failure mode, verified your understanding of <code>fill</code>'s replacement mechanics, and added a safety net for future prompt authors. Next week, you'll step into <code>[json_call](04_json_call.html)</code> to see how filled prompts extract structured data with retries.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="02_call_llm.html">&larr; call_llm</a></span>
+    <span><a href="04_json_call.html">json_call &rarr;</a></span>
+  </nav>
+</body>
+</html>

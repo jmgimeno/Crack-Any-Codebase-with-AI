@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OverviewNode — utils</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; utils tour</a></p>
+<h1>Chapter 5: OverviewNode</h1>
+<p>A reusable workflow step that prepares data, runs the AI to generate page summaries, handles failures gracefully, and stores the results. Think of it as a standardized assembly line station in a factory, consistently turning raw findings into polished introductory text without stopping production if something fails.</p>
+<h2>What you will touch in week one</h2>
+<p>You’ll spend most of your time inside <code>utils/nodes.py</code> (the <code>OverviewNode</code> class) and <code>utils/overview.py</code> (the <code>write_overview</code> helper). Your day-to-day will involve:</p>
+<ul>
+<li>Tuning the <code>_PROMPT</code> template to adjust tone, density, or section constraints based on how <code>[crawl](01_crawl.html)</code> findings are being summarized.</li>
+<li>Mapping upstream analysis results to the <code>spec(shared)</code> contract so the node receives <code>{name, what, sections, facts}</code> in the expected shape.</li>
+<li>Debugging the regex parser in <code>write_overview</code> when the model drifts from the requested <code>## </code> header format.</li>
+<li>Adjusting <code>max_retries</code> and <code>wait</code> on the node constructor to balance pipeline latency against success rates for large <code>[call_llm](02_call_llm.html)</code> prompts.</li>
+</ul>
+<h2>What to avoid</h2>
+<ul>
+<li><strong>Do not remove or bypass <code>exec_fallback</code>.</strong> It intentionally returns <code>{&quot;welcome&quot;: &quot;&quot;, &quot;intros&quot;: {}}</code> on any <code>exec</code> failure. Downstream renderers rely on this empty structure to keep the page layout intact. Returning <code>None</code> or raising will crash the entire chapter flow.</li>
+<li><strong>Don’t switch this node to <code>[json_call](04_json_call.html)</code>.</strong> <code>OverviewNode</code> expects raw markdown output, not structured JSON. The parser explicitly splits on <code>## </code> headers. Forcing JSON extraction will break the regex matcher and require a full pipeline rewrite.</li>
+<li><strong>Never mutate <code>shared</code> outside <code>post()</code>.</strong> The <code>shared</code> dict is the single source of truth for pipeline state. Only <code>post()</code> is allowed to write to <code>shared[&quot;overview&quot;]</code>. Modifying it in <code>prep</code> or <code>exec</code> violates the PocketFlow lifecycle and causes race conditions in concurrent chapter runs.</li>
+<li><strong>Don’t hardcode repo names or facts in <code>_PROMPT</code>.</strong> The prompt is intentionally parameterized. If you need static examples, keep them in the prompt template, but always route actual data through <code>spec(shared)</code>.</li>
+<li><strong>Leave the <code>## </code> header expectation alone.</strong> The regex <code>r'^##[ \t]+(.+?)[ \t]*\n'</code> is strict. Adding <code>###</code> subheaders or changing the spacing will cause sections to silently fall back to their plain <code>gist</code> descriptions.</li>
+</ul>
+<h2>Commands you need to know</h2>
+<p>Drop these into your terminal to verify behavior before committing:</p>
+<pre><code class="language-bash"># Smoke test write_overview with mock data
+python -c &quot;
+from utils.overview import write_overview
+sections = [('Architecture', 'high-level component map'), ('Endpoints', 'API surface')]
+res = write_overview('MyApp', 'a service mesh', sections, facts='Uses gRPC + sidecar proxy')
+print('Welcome:', res['welcome'][:80])
+print('Intros keys:', list(res['intros'].keys()))
+&quot;
+
+# Verify fallback behavior returns safe empty dicts
+python -c &quot;
+from utils.nodes import OverviewNode
+node = OverviewNode(spec=lambda s: {'name': 'X', 'what': 'Y', 'sections': []})
+print(node.exec_fallback(None, RuntimeError('simulated crash')))
+&quot;
+
+# Clear LLM cache to force fresh generation during prompt tuning
+rm -rf utils/.cache
+
+# Test node lifecycle with a mock shared dict
+python -c &quot;
+from utils.nodes import OverviewNode
+shared = {'crawl': 'mock code dump'}
+node = OverviewNode(spec=lambda s: {'name': 'Test', 'what': 'demo', 'sections': [('Intro', 'summary')]})
+node.run(shared)
+print('Stored key:', 'overview' in shared)
+print('Welcome exists:', bool(shared['overview']['welcome']))
+&quot;
+
+# Inspect generated prompt before it hits the model
+python -c &quot;
+from utils.overview import _PROMPT
+print(_PROMPT.format(name='Repo', what='schema', facts='none', sections='- A: B', headers='## A')[:300])
+&quot;
+</code></pre>
+<h2>Conventions that will trip you up</h2>
+<ul>
+<li><strong><code>spec(shared)</code> has a strict return contract.</strong> It must return a dict with exactly <code>name</code>, <code>what</code>, <code>sections</code> (list of <code>(title, gist)</code> tuples), and optionally <code>facts</code>. Missing keys will cause <code>KeyError</code> in <code>exec()</code>, triggering the fallback and leaving the page intro blank.</li>
+<li><strong><code>overview.py</code> uses <code>.format()</code>, not <code>[fill](03_fill.html)</code>.</strong> Because <code>_PROMPT</code> is a private module constant, it uses standard string formatting. If <code>facts</code> or <code>sections</code> contain literal <code>{</code> or <code>}</code>, <code>.format()</code> will crash. You must escape braces or sanitize upstream findings before they reach this node.</li>
+<li><strong>Regex parsing is order- and case-insensitive for keys.</strong> The parser strips headers and converts them to <code>.lower()</code> for dict keys. If two sections share a base name (e.g., <code>## Auth</code> and <code>## AuthN</code>), the second will overwrite the first in <code>blocks</code>.</li>
+<li><strong>Fallback swallows the original exception.</strong> <code>exec_fallback</code> receives <code>exc</code> but does not log it by default. If your pipeline is silently skipping overviews, you’ll need to add a <code>print()</code> or <code>logging.warning()</code> inside <code>exec_fallback</code> to surface the root cause.</li>
+<li><strong><code>shared[&quot;overview&quot;]</code> is consumed synchronously by the renderer.</strong> The pipeline assumes this key exists and contains strings. If you change the return shape of <code>write_overview</code> to return HTML, JSON, or nested dicts, the renderer will throw template errors.</li>
+</ul>
+<h2>Who to ask</h2>
+<ul>
+<li><strong>Prompt tone &amp; header structure:</strong> Ping <code>@prompt-engineering</code>. They own the <code>_PROMPT</code> template, define the &quot;knowledgeable colleague&quot; voice, and track how section constraints affect model compliance.</li>
+<li><strong>Node lifecycle &amp; PocketFlow integration:</strong> Ask <code>@tooling-llm</code>. They maintain the base <code>Node</code> class, <code>prep</code>/<code>exec</code>/<code>post</code> contracts, and fallback patterns across the repo.</li>
+<li><strong>Downstream rendering &amp; <code>shared</code> consumption:</strong> Loop in <code>@docs</code> or <code>@frontend</code>. They consume <code>shared[&quot;overview&quot;]</code> and will tell you if your fallback shape or key naming breaks the HTML generator.</li>
+<li><strong>Retry budgets &amp; pipeline latency:</strong> Consult <code>@infrastructure</code>. They track how <code>max_retries=2</code> and <code>wait=2</code> interact with <code>[call_llm](02_call_llm.html)</code> rate limits and CI timeout budgets.</li>
+</ul>
+<h2>Your first ticket</h2>
+<p><strong>Title:</strong> Sanitize <code>{}</code> in <code>facts</code> and <code>sections</code> before <code>.format()</code> call<br />
+<strong>Scope:</strong> Update <code>write_overview()</code> in <code>overview.py</code> to escape literal braces in <code>facts</code> and <code>sections</code> strings before passing them to <code>_PROMPT.format()</code>. Replace <code>{</code> with <code>{{</code> and <code>}</code> with <code>}}</code> so raw findings from <code>[crawl](01_crawl.html)</code> or analysis nodes don’t crash the formatter. Update the docstring to note this safety step, and write a test that passes <code>facts='{&quot;auth&quot;: &quot;jwt&quot;}'</code> and verifies successful generation.<br />
+<strong>Risk:</strong> Low. Purely additive string sanitization. Does not change return shape, node contract, or <code>[call_llm](02_call_llm.html)</code> caching. Prevents a latent <code>IndexError</code>/<code>KeyError</code> in production pipelines.<br />
+<strong>Deadline:</strong> Ship by Friday. Once merged, you’ll have hardened the prompt injection layer, verified the node’s fallback resilience, and learned exactly how this repo safely bridges raw code analysis into polished documentation.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="04_json_call.html">&larr; json_call</a></span>
+    <span>&nbsp;</span>
+  </nav>
+</body>
+</html>
