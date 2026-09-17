@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Node — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 2: Node</h1>
+<p>You've seen how <a href="01_flow.html">Flow</a> chains stations together like an assembly line. But what happens inside a single station? If you write a script that reads files, calls an API, and saves results all in one giant block, one failure breaks everything. You need structure inside the step, not just between steps.</p>
+<p>Enter the <strong>Node</strong>.</p>
+<h2>The Workstation Routine</h2>
+<p>Think of a Node as a dedicated robot at a workstation. It doesn't just &quot;do stuff.&quot; It follows a strict routine to ensure reliability:</p>
+<ol>
+<li><strong>Gather Tools (<code>prep</code>)</strong>: Check the clipboard, load the product, and prepare materials.</li>
+<li><strong>Perform Task (<code>exec</code>)</strong>: Do the specialized work, like scanning for defects or stamping a part.</li>
+<li><strong>Package Output (<code>post</code>)</strong>: Save the result, update the clipboard, and signal that the station is done.</li>
+</ol>
+<p>This separation prevents &quot;spaghetti logic&quot; where reading configuration is tangled with calling the LLM. Each phase has a single responsibility.</p>
+<h2>The Lifecycle Methods</h2>
+<p>Every Node defines three methods. Let's look at how a node like <a href="04_smartcrawl.html">SmartCrawl</a> uses them.</p>
+<h3>1. Prep: Gathering Tools</h3>
+<p>The <code>prep</code> method reads from the <a href="03_shared.html">shared</a> context and returns exactly what the execution phase needs. It isolates input gathering from the core logic.</p>
+<pre><code class="language-python">def prep(self, shared):
+    files = list_files(shared[&quot;repo_path&quot;])
+    manifest = build_preview(files)
+    prompt = load_prompt(&quot;select.md&quot;)
+    return prompt, files
+</code></pre>
+<p>Notice <code>prep</code> only touches <code>shared</code> to read inputs. It doesn't call the LLM or save results. It just packs a bag for <code>exec</code>.</p>
+<h3>2. Exec: Performing the Task</h3>
+<p>The <code>exec</code> method takes the inputs from <code>prep</code> and does the heavy lifting. This is usually where the LLM is called.</p>
+<pre><code class="language-python">def exec(self, inputs):
+    prompt, files = inputs
+    response = call_llm(prompt)
+    indices = parse_yaml(response)
+    return [files[i] for i in indices]
+</code></pre>
+<p><code>exec</code> is pure work. It doesn't know about <code>shared</code>. It doesn't know about other nodes. It just transforms inputs into outputs. If the LLM returns garbage, <code>exec</code> raises an error, and the Node's retry mechanism kicks in automatically.</p>
+<h3>3. Post: Packaging Output</h3>
+<p>The <code>post</code> method takes the result from <code>exec</code> and updates the <a href="03_shared.html">shared</a> clipboard for downstream nodes.</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    selected = exec_res
+    shared[&quot;codebase&quot;] = read_files(selected)
+    shared[&quot;selected_files&quot;] = selected
+    print(f&quot;  Selected {len(selected)} files&quot;)
+</code></pre>
+<p>Now the next station can read <code>shared[&quot;codebase&quot;]</code> without needing to know how <a href="04_smartcrawl.html">SmartCrawl</a> chose those files.</p>
+<h2>Built-in Resilience</h2>
+<p>Nodes aren't just functions; they are durable workers. In a fragile script, a network blip might crash the whole pipeline. A Node handles errors gracefully.</p>
+<p>You can configure retries directly on the class:</p>
+<pre><code class="language-python">class SmartCrawl(Node):
+    def __init__(self):
+        super().__init__(max_retries=3, wait=2)
+</code></pre>
+<p>If <code>exec</code> raises an error (for example, because <a href="08_parse_yaml.html">parse_yaml</a> detected a missing code fence), the Node catches it, waits two seconds, and tries again. You don't need to write <code>try/except</code> blocks manually. The Node ensures the work gets done.</p>
+<h2>Lifecycle Sequence</h2>
+<p>The diagram below shows how a Node cycles through its phases. It reads context, performs work, and updates the shared state before signaling the <a href="01_flow.html">Flow</a> that it is ready for the next step.</p>
+<pre class="mermaid">sequenceDiagram
+    participant F as Flow
+    participant N as Node
+    participant S as Shared
+    participant L as LLM
+
+    F->>N: Trigger execution with shared data
+    N->>S: Prep reads input context
+    N->>L: Exec sends prompt to model
+    L->>N: Model returns raw response
+    N->>S: Post saves results to clipboard
+    N->>F: Signal completion to pipeline
+</pre>
+<h2>Summary</h2>
+<p>A Node is the fundamental unit of work. It encapsulates a step's logic into a reliable lifecycle: <code>prep</code> gathers inputs, <code>exec</code> performs the task, and <code>post</code> saves the outcome. This structure keeps your code testable, readable, and resilient against failures.</p>
+<p>Now that you understand how a Node packages its work, you might wonder how stations share information without getting tangled. How does one node update a value that another node depends on? The answer lies in the <a href="03_shared.html">shared</a> context, the clipboard that travels down the assembly line.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="01_flow.html">&larr; Flow</a></span>
+    <span><a href="03_shared.html">shared &rarr;</a></span>
+  </nav>
+</body>
+</html>

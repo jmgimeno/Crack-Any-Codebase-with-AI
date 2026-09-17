@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>workflow tour</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <h1>workflow</h1>
+  <p class="muted">Lens: <span class="lens">beginner-tutorial</span> &middot; 8 chapters &middot; 3 files analyzed</p>
+  <p>This project is an automated codebase documentation generator that uses an LLM-powered pipeline to analyze repositories and produce structured learning guides. It selects key files, extracts core concepts, maps their relationships, and sequentially writes formatted HTML tutorials.</p>
+
+  <h2>Architecture map</h2>
+  <pre class="mermaid">
+flowchart TD
+    A0["Flow"]
+    A1["Node"]
+    A2["shared"]
+    A3["SmartCrawl"]
+    A4["Analyze"]
+    A5["Relate"]
+    A6["WriteChapters"]
+    A7["parse_yaml"]
+    A0 -- "sequences execution of" --> A3
+    A3 -- "feeds filtered codebase to" --> A4
+    A4 -- "extracts core concepts for" --> A5
+    A5 -- "maps structural dependencies f" --> A6
+    A6 -- "populates final output in" --> A2
+    A1 -- "reads and writes context to" --> A2
+    A1 -- "defines prep-exec-post lifecyc" --> A3
+    A3 -- "validates LLM output with" --> A7
+  </pre>
+
+  <h2>Read in order</h2>
+  <ol>
+    <li><a href="01_flow.html">Flow</a></li>
+    <li><a href="02_node.html">Node</a></li>
+    <li><a href="03_shared.html">shared</a></li>
+    <li><a href="04_smartcrawl.html">SmartCrawl</a></li>
+    <li><a href="05_analyze.html">Analyze</a></li>
+    <li><a href="06_relate.html">Relate</a></li>
+    <li><a href="07_writechapters.html">WriteChapters</a></li>
+    <li><a href="08_parse_yaml.html">parse_yaml</a></li>
+  </ol>
+
+  <h2>Files the LLM picked</h2>
+<p>This codebase implements a pipeline for generating architectural documentation from a repository using LLMs. The main entry point is main.py, which handles CLI arguments and orchestrates the rendering of output files. The core logic is structured as a flow defined in flow.py, which chains together several processing nodes detailed in nodes.py to capture the entire application flow from crawling code to generating sequential chapters. I will select these three files as they contain all the substantive architecture and business logic, skipping the dependency manifest.</p>
+
+  <ul class="files">
+    <li><code>flow.py</code></li>
+    <li><code>main.py</code></li>
+    <li><code>nodes.py</code></li>
+  </ul>
+</body>
+</html>

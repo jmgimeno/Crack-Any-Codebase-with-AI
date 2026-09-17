@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SmartCrawl — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 4: SmartCrawl</h1>
+<p>What happens when you point this pipeline at a repository with ten thousand files? If you blindly copy everything and feed it to a language model, you will instantly hit token limits, waste money on test fixtures and lock files, and drown the model in noise. You cannot analyze what you cannot see. You need a way to find the actual application logic before you even think about writing a tutorial.</p>
+<p>Enter <a href="04_smartcrawl.html">SmartCrawl</a>. It operates like a knowledgeable librarian quickly skimming thousands of books to hand you only the essential volumes that truly capture the subject. Instead of reading every page, it uses a two-step filter: a fast local sweep followed by an intelligent review.</p>
+<h2>The Preview Manifest</h2>
+<p>Before asking the model for help, the node needs a map of the territory. In the <a href="02_node.html">prep</a> phase, SmartCrawl walks the directory tree and grabs a small preview of each file. This creates a manifest, which is simply a numbered list of paths paired with the first few hundred characters of code.</p>
+<pre><code class="language-python">manifest_parts = []
+for i, path in enumerate(files):
+    preview = safe_read(path)[:800]
+    manifest_parts.append(f&quot;[{i}] {path}\n{preview}&quot;)
+</code></pre>
+<p>This approach keeps the context window extremely light. The model never sees full files yet. It just sees enough to recognize that a configuration file is setup, a core module is logic, and a test directory is noise.</p>
+<h2>Delegating the Selection</h2>
+<p>During the <a href="02_node.html">exec</a> phase, the manifest is sent to the language model. The prompt asks for a specific number of files that best explain the project's architecture. The model reviews the previews and responds with a YAML list of indices alongside a brief reasoning.</p>
+<pre><code class="language-python">def exec(self, inputs):
+    result = parse_yaml(call_llm(inputs))
+    indices = result[&quot;selected&quot;]
+    return [files[i] for i in indices]
+</code></pre>
+<p>Notice how <a href="08_parse_yaml.html">parse_yaml</a> handles the extraction. If the model returns garbage or forgets the code fence, the <a href="02_node.html">Node</a> retry logic catches the error and asks again. You only get valid file paths, never broken JSON or hallucinated routes.</p>
+<h2>Packaging the Codebase</h2>
+<p>Once the indices are confirmed, the <a href="02_node.html">post</a> phase steps in. It opens the chosen files, reads their complete contents, and stitches them together into a single text block. This block is written directly to the <a href="03_shared.html">shared</a> clipboard.</p>
+<pre><code class="language-python">shared[&quot;codebase&quot;] = &quot;\n\n&quot;.join(read_files(selected))
+shared[&quot;selected_files&quot;] = selected
+shared[&quot;selection_reasoning&quot;] = reasoning
+</code></pre>
+<p>This is a crucial handoff. Downstream steps never need to know how the files were chosen. They just know that <code>codebase</code> contains exactly what they need, ready for deeper inspection. The clipboard now holds the raw materials for the next station.</p>
+<h2>The Selection Flow</h2>
+<p>The diagram below shows how SmartCrawl navigates the filesystem and the model. It gathers previews, gets approval, reads the full text, and updates the pipeline memory.</p>
+<pre class="mermaid">sequenceDiagram
+participant F as Flow
+participant C as SmartCrawl
+participant FS as Filesystem
+participant L as LLM
+participant S as Shared
+
+F->>C: Trigger crawl node
+C->>FS: Walk directory tree
+FS-->>C: Return file paths
+C->>C: Build preview manifest
+C->>L: Request file selection
+L-->>C: Return indices
+C->>FS: Read full code
+C->>S: Save codebase and paths
+C->>F: Signal completion
+</pre>
+<h2>Summary</h2>
+<p>SmartCrawl solves the discovery problem. It prevents the pipeline from choking on irrelevant files while ensuring the model sees enough context to make architectural decisions. By filtering early and reading late, it saves tokens, reduces latency, and keeps the signal strong.</p>
+<p>Now that you have a curated list of files packed into the clipboard, you might wonder how the pipeline turns raw code into human readable concepts. How does it spot the core patterns hidden inside those selected files? That is the job of <a href="05_analyze.html">Analyze</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="03_shared.html">&larr; shared</a></span>
+    <span><a href="05_analyze.html">Analyze &rarr;</a></span>
+  </nav>
+</body>
+</html>

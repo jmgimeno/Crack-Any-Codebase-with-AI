@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flow — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 1: Flow</h1>
+<p>Imagine you hand a developer a random open-source repository and ask for a tutorial. The repo might contain thousands of files: configuration, tests, documentation, and core logic. Where do you even start? If you just dump everything into a language model, you'll hit context limits and get noise. If you try to manually script every step—crawling, filtering, analyzing, writing—you'll end up with a fragile mess of spaghetti code where one failure breaks the whole thing.</p>
+<p>You need a reliable way to chain distinct steps together so data flows smoothly from one stage to the next, like a factory assembly line. Raw materials enter one end, pass through specialized stations, and emerge as a polished product. That is exactly what the <strong>Flow</strong> does.</p>
+<h2>The Assembly Line</h2>
+<p>In <code>flow.py</code>, the assembly line is defined in a single function. Each node represents a specialized station.</p>
+<pre><code class="language-python">def create_tour_flow() -&gt; Flow:
+    crawl = SmartCrawl()
+    analyze = Analyze()
+    relate = Relate()
+    write = WriteChapters()
+
+    crawl &gt;&gt; analyze &gt;&gt; relate &gt;&gt; write
+    return Flow(start=crawl)
+</code></pre>
+<p>Notice the <code>&gt;&gt;</code> operator. This connects nodes in a strict sequence. When <code>crawl</code> finishes, control passes automatically to <code>analyze</code>, then to <code>relate</code>, and finally to <code>write</code>. You don't write loops or conditionals to manage the order; the Flow handles the orchestration. It ensures that steps happen exactly when they should, preventing the &quot;writing before analyzing&quot; bug that plagues unstructured scripts.</p>
+<h2>The Clipboard of Data</h2>
+<p>How do stations share information? The Flow passes a <code>shared</code> dictionary along the line. Think of this like a clipboard that travels with the product. Each station can read from it and update it.</p>
+<pre><code class="language-python">shared = {&quot;repo_path&quot;: args.repo_path, &quot;instructions&quot;: args.instructions}
+create_tour_flow().run(shared)
+</code></pre>
+<p>This bucket starts simple with the repository path and instructions. As the pipeline runs, stations like <a href="04_smartcrawl.html">SmartCrawl</a> add selected files, and <a href="05_analyze.html">Analyze</a> adds architectural insights. By the time <a href="07_writechapters.html">WriteChapters</a> runs, the clipboard is packed with everything needed to generate the tour. The <a href="03_shared.html">shared</a> object is the memory of the pipeline, accumulating knowledge at every step.</p>
+<h2>Sequence of Operations</h2>
+<p>The diagram below shows how the Flow orchestrates the pipeline. It initializes the nodes, passes the shared context, and triggers execution. Each node performs its work, potentially calling the LLM, and updates the shared data before signaling completion.</p>
+<pre class="mermaid">sequenceDiagram
+    participant U as User
+    participant F as Flow
+    participant N as Node
+    participant S as Shared
+    participant L as LLM
+
+    U->>F: Run pipeline with repo path
+    F->>N: Pass shared data to first node
+    N->>S: Read repo path and instructions
+    N->>L: Send prompt for file selection
+    L->>N: Return selected file indices
+    N->>S: Update shared with codebase content
+    N->>F: Signal completion
+    F->>N: Pass shared to next node
+    N->>S: Accumulate analysis results
+    N->>L: Request architecture insights
+    L->>N: Return abstractions
+    N->>F: Signal completion
+    F->>U: Emit final output
+</pre>
+<p>Flow gives you structure. It chains the processing steps, manages the flow of data through the <code>shared</code> context, and provides a clean, declarative way to define the order of operations.</p>
+<p>Now that you see how Flow chains the pipeline together, you might wonder what makes each station tick. How does a step prepare its input, execute its logic, and handle errors? The answer lies in the <a href="02_node.html">Node</a> class, the fundamental building block that Flow orchestrates.</p>
+
+  <nav class="chapter-nav">
+    <span>&nbsp;</span>
+    <span><a href="02_node.html">Node &rarr;</a></span>
+  </nav>
+</body>
+</html>

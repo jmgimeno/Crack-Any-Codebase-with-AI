@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>parse_yaml — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 8: parse_yaml</h1>
+<p>What happens when you ask a language model to return a list of files, but it decides to add a polite greeting first? Or worse, it forgets the closing code fence and spills its answer into the next paragraph? If your pipeline tries to read that messy response as structured data, it crashes immediately. One malformed bracket breaks the entire assembly line.</p>
+<p>You cannot trust the model to follow formatting rules on the first try. You need a bouncer at the door.</p>
+<p>Enter <strong>parse_yaml</strong>. It acts like a strict quality control gatekeeper who only accepts properly stamped forms. If the handwriting is messy, the stamp is missing, or the ink is smudged, the form gets thrown back until it matches the exact template.</p>
+<h2>The Strict Extractor</h2>
+<p>At its core, <code>parse_yaml</code> is a small function with a big responsibility. It sits between the raw text from the model and the structured data your pipeline expects.</p>
+<pre><code class="language-python">def parse_yaml(text):
+    m = re.search(r&quot;```yaml\s*\n(.*?)```&quot;, text, re.DOTALL)
+    assert m, f&quot;Missing code fence&quot;
+    return yaml.safe_load(m.group(1))
+</code></pre>
+<p>Notice how it refuses to guess. It uses a regular expression to hunt for the markdown code fence markers. If they are not there, the <code>assert</code> statement fires an error. If they are there, it hands the contents to <code>yaml.safe_load</code>, which safely converts the text into Python dictionaries and lists.</p>
+<p>This function never tries to fix broken syntax. It does not attempt to parse JSON when YAML fails. It simply says no and stops.</p>
+<h2>Triggering the Retry Loop</h2>
+<p>You might wonder why failing is a good thing. In this pipeline, failure is the fuel for reliability. Because <code>parse_yaml</code> raises an error on bad formatting, it triggers the built-in resilience of the <a href="02_node.html">Node</a>.</p>
+<p>Every station that calls the model, like <a href="04_smartcrawl.html">SmartCrawl</a> or <a href="05_analyze.html">Analyze</a>, inherits a retry mechanism. When <code>parse_yaml</code> throws an assertion error, the Node catches it, pauses for a few seconds, and asks the model to try again. This creates a silent feedback loop. The model receives a hard stop instead of partial data, learns that its format was rejected, and corrects itself on the next attempt.</p>
+<h2>The Quality Control Flow</h2>
+<p>The diagram below shows how the gatekeeper interacts with the rest of the system. It validates the output before any data touches the <a href="03_shared.html">shared</a> clipboard.</p>
+<pre class="mermaid">sequenceDiagram
+    participant L as Model
+    participant P as Parser
+    participant N as Node
+    participant F as Flow
+
+    L->>P: Return raw text response
+    alt Valid fence found
+        P->>P: Extract and parse data
+        P->>N: Return structured result
+        N->>F: Update clipboard and continue
+    else Fence missing or broken
+        P->>P: Raise assertion error
+        P->>N: Signal format failure
+        N->>N: Wait and trigger retry
+        N->>L: Resend original prompt
+    end
+</pre>
+<p>This loop ensures that downstream steps never have to write defensive code. <a href="06_relate.html">Relate</a> does not check if its relationship list is empty. <a href="07_writechapters.html">WriteChapters</a> does not handle missing abstraction names. The gatekeeper guarantees that only clean, validated structures move forward.</p>
+<h2>Why Strictness Wins</h2>
+<p>Flexible parsers sound convenient, but they quietly accumulate technical debt. If your code tolerates slightly broken output today, the model will learn to produce consistently mediocre output tomorrow. It will find the path of least resistance and fill your results with conversational fluff, inconsistent keys, and hallucinated values.</p>
+<p>By enforcing a rigid contract, <code>parse_yaml</code> forces the model to align with your pipeline expectations. It turns probabilistic generation into deterministic data. When the pipeline finally reaches the <a href="03_shared.html">shared</a> clipboard, every key matches the prompt, every list is complete, and every diagram renders correctly.</p>
+<h2>The Final Piece</h2>
+<p>You have now walked through every station on the assembly line. The <a href="01_flow.html">Flow</a> orchestrates the sequence. The <a href="02_node.html">Node</a> packages the work. The <a href="03_shared.html">shared</a> dictionary carries the memory. <a href="04_smartcrawl.html">SmartCrawl</a> finds the signal. <a href="05_analyze.html">Analyze</a> maps the concepts. <a href="06_relate.html">Relate</a> draws the connections. <a href="07_writechapters.html">WriteChapters</a> weaves the narrative. And <strong>parse_yaml</strong> stands at the intersection of every model call, ensuring the data never breaks the chain.</p>
+<p>You now have the full picture of how raw repositories transform into guided tours. When you run the pipeline next time, watch the retry counters climb and fall. Notice how the strict gatekeeper catches errors before they become dead ends. The magic is not in the model alone. It is in the structure that tames it. Now that you understand every gear in the machine, you are ready to point it at your own codebase and watch the assembly line build something remarkable.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="07_writechapters.html">&larr; WriteChapters</a></span>
+    <span>&nbsp;</span>
+  </nav>
+</body>
+</html>

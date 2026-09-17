@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WriteChapters — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 7: WriteChapters</h1>
+<p>What happens when you ask a language model to write a ten-chapter tutorial in a single prompt? The result is usually disjointed. The tone shifts halfway through, later chapters reference concepts that were never introduced, and the narrative feels like a pile of unrelated essays stapled together. You lose the thread.</p>
+<p>To write a coherent guide, you need a sequential narrative. Every new section must remember what came before, building naturally on the previous foundation. You need an author who drafts the book page by page, carrying the memory of the story forward with every step.</p>
+<p>Enter <strong>WriteChapters</strong>. It operates like a dedicated writer sitting at a desk, generating each chapter one by one. Instead of firing all requests in parallel, it loops through the outline, writes a chapter, saves it, and then feeds that text back as context for the next request. This ensures the tutorial reads as a unified whole, not a collection of isolated fragments.</p>
+<h2>The Sequential Drafting Loop</h2>
+<p>Most pipeline steps process data in parallel or independently. <strong>WriteChapters</strong> breaks this pattern on purpose. If you generated chapters simultaneously, Chapter 8 might contradict Chapter 2, or the model might hallucinate cross-references to chapters that don't exist yet.</p>
+<p>By enforcing a strict loop inside the <a href="02_node.html"><code>exec</code></a> method, the node guarantees order. It iterates through the learning sequence provided by <a href="05_analyze.html"><code>Analyze</code></a> and generates content step by step.</p>
+<pre><code class="language-python">def exec(self, ctx):
+    prev_chapters = []
+    for i, name in enumerate(ctx[&quot;order&quot;]):
+        prev = &quot;\n\n---\n\n&quot;.join(prev_chapters)
+        prompt = load_prompt(&quot;write-chapter.md&quot;).format(
+            name=name, prev_chapters=prev, ...
+        )
+        content = call_llm(prompt)
+        prev_chapters.append(content)
+</code></pre>
+<p>Notice the <code>prev_chapters</code> list. This is the writer's memory. Before requesting a new chapter, the node joins all previously written text with a separator and injects it into the prompt. The model sees exactly what has been written so far, allowing it to maintain continuity, avoid repetition, and link back to earlier ideas smoothly.</p>
+<h2>The Context Backpack</h2>
+<p>As the loop progresses, the prompt grows. Chapter 1 is requested with an empty context. Chapter 2 carries Chapter 1. By Chapter 5, the prompt contains the full text of Chapters 1 through 4.</p>
+<p>Think of this like a backpack. The author starts with an empty bag but adds a copy of every finished page before moving to the next. The bag gets heavier, and the context window fills up, but the reward is narrative coherence. The model can write &quot;As we discussed in the first chapter...&quot; because the first chapter is literally right there in the prompt.</p>
+<p>The node also loads external instructions during <a href="02_node.html"><code>prep</code></a>. This allows the same codebase to be toured through different lenses. A beginner tutorial focuses on simple analogies, while a security audit might highlight vulnerabilities. The <code>shared</code> dictionary provides the path to these instructions, and <strong>WriteChapters</strong> injects them into every prompt.</p>
+<pre><code class="language-python">def prep(self, shared):
+    instructions = load_instructions(
+        shared.get(&quot;instructions&quot;, &quot;beginner-tutorial&quot;)
+    )
+    return {
+        &quot;codebase&quot;: shared[&quot;codebase&quot;],
+        &quot;instructions&quot;: instructions,
+        &quot;order&quot;: shared[&quot;order&quot;],
+    }
+</code></pre>
+<h2>Why Not Parallel?</h2>
+<p>You might wonder why this node doesn't use a <code>BatchNode</code> to write chapters faster. Speed is tempting, but parallel execution destroys the narrative chain. If chapters are written simultaneously, they are blind to each other. They cannot reference previous content, and the tone may drift wildly between generations.</p>
+<p><strong>WriteChapters</strong> inherits from <a href="02_node.html"><code>Node</code></a>, not <code>BatchNode</code>. This design choice trades throughput for quality. The loop inside <code>exec</code> forces serialization. Each chapter must be generated, parsed, and appended before the next one begins. This ensures that the tutorial flows logically, with each section acting as a bridge to the next.</p>
+<h2>Saving the Tour</h2>
+<p>Once the loop completes, all chapters are collected into a list. The <a href="02_node.html"><code>post</code></a> method updates the <a href="03_shared.html"><code>shared</code></a> clipboard with the final results.</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    shared[&quot;chapters&quot;] = exec_res
+    shared[&quot;filenames&quot;] = prep_res[&quot;filenames&quot;]
+</code></pre>
+<p>The <code>chapters</code> key now holds a list of dictionaries, each containing the chapter name, filename, and full markdown content. The <code>filenames</code> key maps abstraction names to file paths, which the rendering script uses to generate the final HTML files. At this point, the pipeline has transformed a raw repository into a complete, navigable tour.</p>
+<h2>The Writing Flow</h2>
+<p>The diagram below shows how <strong>WriteChapters</strong> orchestrates the sequential drafting process. It requests chapters one by one, accumulates context, and saves the complete output at the end.</p>
+<pre class="mermaid">sequenceDiagram
+participant W as Writer
+participant L as LLM
+participant C as Context
+participant S as Shared
+
+W->>L: Request first chapter
+L-->>W: Return chapter text
+W->>C: Append text to context
+W->>L: Request next chapter with context
+L-->>W: Return next chapter
+W->>C: Append new text
+W->>S: Save all chapters
+</pre>
+<h2>Summary</h2>
+<p><strong>WriteChapters</strong> bridges the gap between structure and narrative. It takes the abstractions, order, and codebase accumulated by previous steps and weaves them into a cohesive tutorial. By looping through chapters sequentially and feeding prior content back as context, it ensures the output reads like a single, continuous guide rather than disconnected pages.</p>
+<p>Now you have the chapters written and saved on the clipboard. But you might notice that every step in this pipeline asks the model for structured data, like lists of file indices or abstraction names. What happens if the model returns messy text instead of clean YAML? The pipeline wouldn't survive without a strict validator to catch errors before they break the flow. That is the job of <a href="08_parse_yaml.html"><code>parse_yaml</code></a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="06_relate.html">&larr; Relate</a></span>
+    <span><a href="08_parse_yaml.html">parse_yaml &rarr;</a></span>
+  </nav>
+</body>
+</html>

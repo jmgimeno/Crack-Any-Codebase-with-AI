@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>shared — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 3: shared</h1>
+<p>Imagine you are building a tutorial by passing a notebook through a line of experts. The researcher writes down key findings. The editor highlights the best quotes. The designer sketches diagrams based on those quotes. If the researcher keeps their findings in a private diary, the editor has nothing to work with. If everyone scribbles on random scraps of paper, the designer will never find the quotes.</p>
+<p>You need a single place where every expert can deposit their work and pick up what others have left behind.</p>
+<p>That place is <code>shared</code>.</p>
+<h2>The Project Whiteboard</h2>
+<p>In this pipeline, <code>shared</code> acts as a central whiteboard that travels along with the work. It is a mutable Python dictionary that serves as the pipeline's memory and data exchange layer.</p>
+<p>When the pipeline starts, the whiteboard is mostly blank, containing only the initial instructions. As each step completes, it adds its results to the whiteboard. The next step walks up, reads what's there, adds its own contribution, and passes the whiteboard forward.</p>
+<p>By the time the pipeline finishes, the whiteboard is packed with everything needed to generate the final tour: the selected code, the architectural insights, the relationships, and the written chapters.</p>
+<h2>A Simple Dictionary</h2>
+<p>At its core, <code>shared</code> is just a dictionary. It starts in <a href="01_flow.html">main.py</a> with a few essential keys:</p>
+<pre><code class="language-python">shared = {
+    &quot;repo_path&quot;: args.repo_path,
+    &quot;instructions&quot;: args.instructions,
+}
+</code></pre>
+<p>This dictionary is passed to the <a href="01_flow.html">Flow</a>, which hands it to each <a href="02_node.html">Node</a> in sequence. Any node can read from <code>shared</code> to get inputs and write to <code>shared</code> to save outputs.</p>
+<pre><code class="language-python">def prep(self, shared):
+    path = shared[&quot;repo_path&quot;]
+    return path
+
+def post(self, shared, prep_res, exec_res):
+    shared[&quot;codebase&quot;] = exec_res
+</code></pre>
+<p>Notice that <code>prep</code> reads the path, while <code>post</code> writes the processed codebase back. The <code>shared</code> object is the bridge between the input of one station and the output of another.</p>
+<h2>How Data Grows</h2>
+<p>The power of <code>shared</code> lies in accumulation. It starts small and grows organically as the pipeline progresses. Different nodes contribute different pieces of the puzzle.</p>
+<p>Here is how the whiteboard fills up during a typical run:</p>
+<ul>
+<li><strong>Start</strong>: Contains <code>repo_path</code> and <code>instructions</code>.</li>
+<li><strong><a href="04_smartcrawl.html">SmartCrawl</a></strong>: Scans the repository, asks the LLM which files matter, and writes <code>codebase</code>, <code>selected_files</code>, and <code>selection_reasoning</code>.</li>
+<li><strong><a href="05_analyze.html">Analyze</a></strong>: Reads the <code>codebase</code>, extracts core concepts, and writes <code>summary</code>, <code>abstractions</code>, and <code>order</code>.</li>
+<li><strong><a href="06_relate.html">Relate</a></strong>: Reads the <code>abstractions</code>, maps how they connect, and writes <code>relationships</code>.</li>
+<li><strong><a href="07_writechapters.html">WriteChapters</a></strong>: Reads everything accumulated so far, generates the tutorial text, and writes <code>chapters</code> and <code>filenames</code>.</li>
+</ul>
+<p>Downstream nodes never need to know <em>how</em> upstream nodes did their work. They only need to know what keys exist on the whiteboard. This decoupling makes the pipeline modular and flexible.</p>
+<h2>The Flow of State</h2>
+<p>The diagram below shows how <code>shared</code> accumulates data as it moves through the pipeline. Each node reads the current state, performs its task, and enriches the state for the next node.</p>
+<pre class="mermaid">sequenceDiagram
+participant M as Main
+participant F as Flow
+participant N as Node
+participant S as Shared
+
+M->>S: Initialize with repo path and instructions
+M->>F: Run pipeline with shared context
+F->>N: Pass shared dictionary to node
+N->>S: Read required input keys
+N->>S: Write results to new keys
+F->>N: Pass updated shared to next node
+N->>S: Read accumulated data from previous steps
+</pre>
+<p>In this flow, <code>shared</code> is the only state that survives between nodes. The <a href="01_flow.html">Flow</a> manages the order, the <a href="02_node.html">Node</a> manages the execution, but <code>shared</code> holds the knowledge.</p>
+<h2>Writing and Reading Rules</h2>
+<p>Since <code>shared</code> is a mutable dictionary, anyone can overwrite anything. To keep the pipeline stable, nodes follow simple conventions:</p>
+<ul>
+<li><strong>Read in <code>prep</code></strong>: Nodes gather inputs during the <code>prep</code> phase. This isolates input dependencies and makes the node easier to test.</li>
+<li><strong>Write in <code>post</code></strong>: Nodes update <code>shared</code> only after successful execution. This prevents partial or corrupted data if a step fails and retries.</li>
+<li><strong>Use descriptive keys</strong>: Keys like <code>abstractions</code> and <code>selection_reasoning</code> make the data self-documenting. Avoid single-letter keys or ambiguous names.</li>
+</ul>
+<p>The <a href="02_node.html">Node</a> lifecycle enforces this discipline. If <code>exec</code> raises an error, <code>post</code> never runs, so <code>shared</code> remains unchanged. The <a href="01_flow.html">Flow</a> can then retry the node without worrying about stale results.</p>
+<h2>Summary</h2>
+<p>The <code>shared</code> dictionary is the pipeline's central memory. It starts as a simple clipboard with a few instructions and evolves into a rich context containing code, analysis, relationships, and output. By passing <code>shared</code> through the assembly line, nodes can collaborate without tight coupling, and the pipeline can accumulate knowledge step by step.</p>
+<p>Now that you understand how data flows between stations, you might wonder how the pipeline decides what code is worth analyzing. A repository can contain thousands of files, but most are irrelevant to a tutorial. How does the system filter the noise and pick the signal? That is the job of <a href="04_smartcrawl.html">SmartCrawl</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="02_node.html">&larr; Node</a></span>
+    <span><a href="04_smartcrawl.html">SmartCrawl &rarr;</a></span>
+  </nav>
+</body>
+</html>
