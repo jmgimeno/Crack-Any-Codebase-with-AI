@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>params — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 5: params</h1>
+<p>Imagine you built a tiny image flow.</p>
+<p>It loads an image, applies a filter, and saves the result.</p>
+<pre><code class="language-python">load - &quot;apply_filter&quot; &gt;&gt; apply_filter
+apply_filter - &quot;save&quot; &gt;&gt; save
+</code></pre>
+<p>That works nicely for one job:</p>
+<blockquote>
+<p>Process <code>cat.jpg</code> with <code>blur</code>.</p>
+</blockquote>
+<p>Then your boss walks over and says:</p>
+<blockquote>
+<p>Great. Now process <code>dog.jpg</code> with <code>sepia</code>, and <code>bird.jpg</code> with <code>grayscale</code>.</p>
+</blockquote>
+<p>Do you create three new flows?</p>
+<p>Do you make <code>BlurCatFlow</code>, <code>SepiaDogFlow</code>, and <code>GrayscaleBirdFlow</code>?</p>
+<p>That would turn your clean little graph into a zoo of nearly identical classes.</p>
+<p>What you really want is the same stations, but different instructions carried into each station.</p>
+<p>That is what <strong>params</strong> are for.</p>
+<h2>Params are instruction cards</h2>
+<p>In <a href="04_flow.html">Flow</a>, you saw that Pocket Flow copies nodes during a run:</p>
+<pre><code class="language-python">curr = copy.copy(self.start_node)
+while curr:
+    action = curr._run(shared)
+    curr = copy.copy(self.get_next_node(curr, action))
+</code></pre>
+<p>That copying keeps the original graph clean.</p>
+<p>But there was another line in the real code:</p>
+<pre><code class="language-python">curr.set_params(p)
+</code></pre>
+<p>That is where params enter the picture.</p>
+<p>Think of <code>params</code> as an instruction card clipped to a station for one run.</p>
+<p>The station itself does not change.</p>
+<p>The worker still knows how to load images, apply filters, and save files.</p>
+<p>But the card says:</p>
+<blockquote>
+<p>For this pass, use <code>blur</code>.</p>
+</blockquote>
+<p>Or:</p>
+<blockquote>
+<p>For this pass, use <code>sepia</code>.</p>
+</blockquote>
+<p>Same <a href="02_node.html">Node</a>.<br />
+Different instructions.</p>
+<h2>Where params live in the code</h2>
+<p>Every node starts with an empty dictionary called <code>self.params</code>:</p>
+<pre><code class="language-python">class BaseNode:
+    def __init__(self):
+        self.params = {}
+        self.successors = {}
+</code></pre>
+<p>And it has a small setter:</p>
+<pre><code class="language-python">def set_params(self, params):
+    self.params = params
+</code></pre>
+<p>That is all.</p>
+<p><code>params</code> is not magic state.<br />
+It is just an optional dictionary attached to a node or flow.</p>
+<h2>A node reads params</h2>
+<p>Here is the image filter example from the cookbook, simplified:</p>
+<pre><code class="language-python">class ApplyFilter(Node):
+    def prep(self, shared):
+        image = shared[&quot;image&quot;]
+        filter_type = self.params.get(&quot;filter&quot;, &quot;blur&quot;)
+        return image, filter_type
+</code></pre>
+<p>Notice the difference.</p>
+<p>The image itself comes from <a href="01_shared.html">shared</a>:</p>
+<pre><code class="language-python">shared[&quot;image&quot;]
+</code></pre>
+<p>That is working data for this run.</p>
+<p>The filter name comes from params:</p>
+<pre><code class="language-python">self.params.get(&quot;filter&quot;, &quot;blur&quot;)
+</code></pre>
+<p>That is configuration for how this station should behave.</p>
+<p>Then <code>exec</code> does the work:</p>
+<pre><code class="language-python">def exec(self, inputs):
+    image, filter_type = inputs
+    if filter_type == &quot;grayscale&quot;:
+        return image.convert(&quot;L&quot;)
+    return image
+</code></pre>
+<p>The node does not need a new class for grayscale images.<br />
+It just reads the instruction card.</p>
+<h2>Setting params for a flow run</h2>
+<p>You can attach settings to a flow before running it:</p>
+<pre><code class="language-python">flow = Flow(start=load)
+flow.set_params({&quot;input&quot;: &quot;cat.jpg&quot;, &quot;filter&quot;: &quot;blur&quot;})
+flow.run(shared)
+</code></pre>
+<p>During the run, the flow passes those settings to each copied runner.</p>
+<p>A simplified version of Pocket Flow’s orchestration looks like this:</p>
+<pre><code class="language-python">def _orch(self, shared, params=None):
+    curr = copy.copy(self.start_node)
+    p = params or {**self.params}
+    while curr:
+        curr.set_params(p)
+        action = curr._run(shared)
+        curr = copy.copy(self.get_next_node(curr, action))
+    return action
+</code></pre>
+<p>That means the same flow object can run with different settings.</p>
+<p>You do not need to rebuild the graph every time you change a file name or filter type.</p>
+<h2>Params versus shared</h2>
+<p>This is an important distinction.</p>
+<p><a href="01_shared.html">shared</a> is the whiteboard for the run.</p>
+<p><code>params</code> are the instructions attached to the run.</p>
+<p>A rough rule:</p>
+<ul>
+<li>If it describes <strong>how</strong> to run, it may belong in <code>params</code>.</li>
+<li>If it is produced or consumed during execution, it probably belongs in <code>shared</code>.</li>
+</ul>
+<p>For example:</p>
+<pre><code class="language-python">class Summarize(Node):
+    def prep(self, shared):
+        text = shared[&quot;text&quot;]
+        language = self.params.get(&quot;language&quot;, &quot;en&quot;)
+        return text, language
+</code></pre>
+<p>Here:</p>
+<ul>
+<li><code>shared[&quot;text&quot;]</code> is the thing being processed.</li>
+<li><code>self.params[&quot;language&quot;]</code> is how it should be processed.</li>
+</ul>
+<p>That one class can summarize in English, French, Spanish, or any other language without becoming four separate classes.</p>
+<h2>Params make subflows reusable</h2>
+<p>You already know that a <a href="04_flow.html">Flow</a> can behave like a node inside another flow.</p>
+<p>That means a whole subflow can also receive params.</p>
+<p>Imagine a tiny translation subflow:</p>
+<pre><code class="language-python">load_text - &quot;translate&quot; &gt;&gt; translate_node
+translate_node - &quot;save&quot; &gt;&gt; save_node
+</code></pre>
+<p>If each node reads <code>self.params[&quot;language&quot;]</code>, the same subflow can be reused for many languages:</p>
+<pre><code class="language-python">translation_flow.set_params({&quot;language&quot;: &quot;fr&quot;})
+translation_flow.run(shared)
+</code></pre>
+<p>Later:</p>
+<pre><code class="language-python">translation_flow.set_params({&quot;language&quot;: &quot;es&quot;})
+translation_flow.run(shared)
+</code></pre>
+<p>The graph stays the same.</p>
+<p>Only the instruction card changes.</p>
+<p>That is one of the main reasons params exist: <strong>reusable flows without class explosion</strong>.</p>
+<h2>How Flow attaches params during a run</h2>
+<p>Here is the mental model.</p>
+<p>A flow does not permanently glue settings onto your original nodes.</p>
+<p>It copies the current runner and gives that copy a params badge.</p>
+<pre class="mermaid">sequenceDiagram
+participant C as Caller
+participant F as Flow
+participant P as Params
+participant N as Node
+participant S as Shared
+C->>F: Start flow with settings
+F->>P: Attach badge to copied runner
+N->>P: Read filter setting
+N->>S: Write filtered image
+</pre>
+<p>The original graph remains a clean blueprint.</p>
+<p>Each run gets its own temporary instructions.</p>
+<h2>Params can carry any Python object</h2>
+<p>Because <code>self.params</code> is just a dictionary, it can hold more than strings.</p>
+<p>It can hold:</p>
+<ul>
+<li>file paths</li>
+<li>model names</li>
+<li>thresholds</li>
+<li>prompt templates</li>
+<li>clients</li>
+<li>validators</li>
+<li>small configuration objects</li>
+</ul>
+<p>For example:</p>
+<pre><code class="language-python">flow.set_params({&quot;llm&quot;: llm_client, &quot;style&quot;: &quot;concise&quot;})
+</code></pre>
+<p>Then a node could do:</p>
+<pre><code class="language-python">def prep(self, shared):
+    return shared[&quot;text&quot;], self.params[&quot;llm&quot;], self.params[&quot;style&quot;]
+</code></pre>
+<p>Just be careful.</p>
+<p>Params are configuration, not the main working data of the run.</p>
+<p>If you find yourself storing long histories, intermediate results, or final answers in params, those probably belong in <a href="01_shared.html">shared</a> instead.</p>
+<h2>Params can influence routing</h2>
+<p>A node still chooses its next step by returning an action from <code>post</code>.</p>
+<p>But that choice can use params.</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    if self.params.get(&quot;strict&quot;):
+        return &quot;validate&quot;
+    return &quot;default&quot;
+</code></pre>
+<p>Then your <a href="03_successors.html">successors</a> connect those actions:</p>
+<pre><code class="language-python">node - &quot;validate&quot; &gt;&gt; validate_node
+node &gt;&gt; next_node
+</code></pre>
+<p>Params do not route the flow by themselves.</p>
+<p>They give the node information that can help it decide which routing word to return.</p>
+<h2>BatchFlow gives each pass its own params</h2>
+<p>This is where params become especially powerful.</p>
+<p>In the image batch example, a <code>BatchFlow</code> prepares a list of parameter dictionaries:</p>
+<pre><code class="language-python">class ImageBatchFlow(BatchFlow):
+    def prep(self, shared):
+        return [
+            {&quot;input&quot;: &quot;cat.jpg&quot;, &quot;filter&quot;: &quot;grayscale&quot;},
+            {&quot;input&quot;: &quot;dog.jpg&quot;, &quot;filter&quot;: &quot;blur&quot;}
+        ]
+</code></pre>
+<p>Each dictionary becomes the params for one pass through the base flow.</p>
+<p>Internally, <code>BatchFlow</code> does something like this:</p>
+<pre><code class="language-python">for bp in pr:
+    self._orch(shared, {**self.params, **bp})
+</code></pre>
+<p>That line is very important.</p>
+<p>It merges:</p>
+<ul>
+<li>outer flow params</li>
+<li>per-item batch params</li>
+</ul>
+<p>Like this:</p>
+<pre><code class="language-python">outer = {&quot;language&quot;: &quot;en&quot;, &quot;tone&quot;: &quot;formal&quot;}
+item = {&quot;text&quot;: &quot;hello&quot;, &quot;tone&quot;: &quot;warm&quot;}
+run_params = {**outer, **item}
+print(run_params[&quot;tone&quot;])
+</code></pre>
+<p>The later dictionary wins.</p>
+<p>So a batch item can override a default setting.</p>
+<p>That means one reusable subflow can process many different inputs without rewriting the nodes.</p>
+<h2>A node does not need to know it is in a batch</h2>
+<p>The beauty of this design is that the node stays simple.</p>
+<p>This loading node only reads <code>self.params[&quot;input&quot;]</code>:</p>
+<pre><code class="language-python">class LoadImage(Node):
+    def prep(self, shared):
+        path = os.path.join(&quot;images&quot;, self.params[&quot;input&quot;])
+        return path
+</code></pre>
+<p>It does not need to know:</p>
+<ul>
+<li>whether this is a single run</li>
+<li>whether it is inside a batch</li>
+<li>whether the params came from a parent flow</li>
+<li>whether there are three images or three hundred</li>
+</ul>
+<p>It just reads its instruction card.</p>
+<p>That makes nodes much easier to reuse.</p>
+<h2>Params do not automatically go into shared</h2>
+<p>A common mistake is thinking that <code>self.params</code> will appear in <code>shared</code>.</p>
+<p>It does not.</p>
+<p>If you want later nodes to see a param-derived value as run data, copy it explicitly:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    shared[&quot;filter_used&quot;] = self.params.get(&quot;filter&quot;)
+    shared[&quot;image&quot;] = exec_res
+</code></pre>
+<p>This is useful for debugging or reporting.</p>
+<p>But remember the boundary:</p>
+<ul>
+<li><code>params</code> are settings.</li>
+<li><code>shared</code> is run state.</li>
+</ul>
+<p>If you blur the line too much, your flows become harder to reason about.</p>
+<h2>Good habits with params</h2>
+<h3>Use clear key names</h3>
+<p>Just like <a href="01_shared.html">shared</a>, params are dictionaries.</p>
+<p>Good:</p>
+<pre><code class="language-python">self.params[&quot;input&quot;]
+self.params[&quot;filter&quot;]
+self.params[&quot;language&quot;]
+</code></pre>
+<p>Bad:</p>
+<pre><code class="language-python">self.params[&quot;x&quot;]
+self.params[&quot;cfg2&quot;]
+self.params[&quot;stuff&quot;]
+</code></pre>
+<p>The instruction card is easier to read when the labels are obvious.</p>
+<h3>Use <code>.get()</code> for optional settings</h3>
+<p>If a setting may be missing, provide a default:</p>
+<pre><code class="language-python">filter_type = self.params.get(&quot;filter&quot;, &quot;blur&quot;)
+</code></pre>
+<p>This prevents one missing key from crashing the whole run.</p>
+<p>Use <code>self.params[&quot;key&quot;]</code> when you really want failure if the setting is absent.</p>
+<h3>Keep params separate from mutable run data</h3>
+<p>If you put a list or dictionary inside params, multiple runs may share that same object.</p>
+<p>Pocket Flow copies the top-level params dictionary during a run:</p>
+<pre><code class="language-python">p = {**self.params}
+</code></pre>
+<p>That protects simple replacements.</p>
+<p>But nested mutable objects are still references.</p>
+<p>So avoid doing this:</p>
+<pre><code class="language-python">flow.set_params({&quot;history&quot;: []})
+node.params[&quot;history&quot;].append(&quot;oops&quot;)
+</code></pre>
+<p>If you need growing state during a run, put it in <a href="01_shared.html">shared</a>.</p>
+<h3>For separate runs, use separate settings</h3>
+<p>If you reuse the same <code>Flow</code> object for different jobs, set params before each run:</p>
+<pre><code class="language-python">flow.set_params({&quot;input&quot;: &quot;cat.jpg&quot;, &quot;filter&quot;: &quot;blur&quot;})
+flow.run(shared)
+</code></pre>
+<p>For concurrent independent runs, prefer fresh flow instances or a batch design that supplies params per pass.</p>
+<p>This avoids one run accidentally overwriting another run’s instruction card.</p>
+<h2>Params are not successors</h2>
+<p>Do not confuse <code>params</code> with routing.</p>
+<p>Params can influence what action a node returns, but they do not connect nodes by themselves.</p>
+<p>Connections still live in <a href="03_successors.html">successors</a>:</p>
+<pre><code class="language-python">node - &quot;strict&quot; &gt;&gt; strict_node
+node &gt;&gt; normal_node
+</code></pre>
+<p>The params tell the node what kind of job this is.</p>
+<p>The successors say where each routing word leads.</p>
+<h2>Params make one class many jobs</h2>
+<p>Suppose you want a summarizer that can write in different tones.</p>
+<p>Instead of:</p>
+<pre><code class="language-python">class FormalSummarize(Node): ...
+class CasualSummarize(Node): ...
+class ExcitedSummarize(Node): ...
+</code></pre>
+<p>You can write:</p>
+<pre><code class="language-python">class Summarize(Node):
+    def prep(self, shared):
+        text = shared[&quot;text&quot;]
+        tone = self.params.get(&quot;tone&quot;, &quot;neutral&quot;)
+        return text, tone
+</code></pre>
+<p>Then you run the same flow with different params:</p>
+<pre><code class="language-python">flow.set_params({&quot;tone&quot;: &quot;formal&quot;})
+</code></pre>
+<p>Or:</p>
+<pre><code class="language-python">flow.set_params({&quot;tone&quot;: &quot;casual&quot;})
+</code></pre>
+<p>Same station.<br />
+Different instruction card.</p>
+<p>That is the point of params.</p>
+<h2>The mental model to keep</h2>
+<p>When you see <code>params</code>, think:</p>
+<blockquote>
+<p>“This is the instruction card attached to this run.”</p>
+</blockquote>
+<p>It can carry:</p>
+<ul>
+<li>input file names</li>
+<li>filter names</li>
+<li>language settings</li>
+<li>thresholds</li>
+<li>client objects</li>
+<li>prompt styles</li>
+<li>mode flags</li>
+</ul>
+<p>And it lets one reusable <a href="02_node.html">Node</a> or <a href="04_flow.html">Flow</a> handle many different jobs without becoming a pile of nearly identical classes.</p>
+<p>The <a href="01_shared.html">shared</a> board holds the working data.<br />
+<code>params</code> hold the optional settings telling the system how to work on that data.</p>
+<p>Now you know how one flow can receive different instructions for different runs.</p>
+<p>The next natural question is: what if one station needs to process many items at once?</p>
+<p>That is where a single node starts handling a whole tray of inputs, not just one job at a time.<br />
+That is exactly what the next chapter covers: <a href="06_batchnode.html">BatchNode</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="04_flow.html">&larr; Flow</a></span>
+    <span><a href="06_batchnode.html">BatchNode &rarr;</a></span>
+  </nav>
+</body>
+</html>

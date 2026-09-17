@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Node — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 2: Node</h1>
+<p>Imagine you are running an automated factory line, and one of your robotic arms suddenly drops a bolt because of a temporary power glitch. If the entire factory screeches to a halt and throws up its hands the very first time an external API times out or an LLM returns a messy response, your application will constantly crash.</p>
+<p>As we saw in <a href="01_basenode.html">BaseNode</a>, a standard worker handles its task once and immediately fails if anything goes wrong. But real-world network requests and LLM endpoints are notoriously fragile. How do you keep your pipeline running smoothly when external services inevitably hiccup?</p>
+<p>That is where <code>Node</code> comes in.</p>
+<hr />
+<h3>The Built-In Safety Net</h3>
+<p>Building on top of <a href="01_basenode.html">BaseNode</a>, <code>Node</code> acts like an automated circuit breaker protecting a vulnerable component. If a task fails, it automatically retries up to a configured limit before calling a fallback method.</p>
+<p>You can configure your safety net by passing <code>max_retries</code> and a <code>wait</code> interval when initializing your node:</p>
+<pre><code class="language-python">from pocketflow import Node
+
+class RobustSearch(Node):
+    def __init__(self):
+        super().__init__(max_retries=3, wait=2)
+</code></pre>
+<p>If the execution phase throws an exception, the node catches it, waits for the specified seconds, and tries again.</p>
+<hr />
+<h3>How Retries and Fallbacks Work</h3>
+<p>To visualize how a node guards against transient errors, let's look at the retry lifecycle sequence:</p>
+<pre class="mermaid">sequenceDiagram
+    participant S as Shared Store
+    participant N as Node
+    
+    S->>N: Provide shared state
+    N->>N: Attempt task in exec method
+    N->>N: Catch error and retry if limit allows
+    N->>N: Trigger fallback if all retries fail
+    N->>S: Update state in post method
+</pre>
+<p>If all retry attempts are exhausted, the node hands the error over to an <code>exec_fallback</code> method instead of crashing your program. By default, <code>exec_fallback</code> simply re-raises the exception, but you can override it to supply a graceful default value:</p>
+<pre><code class="language-python">    def exec_fallback(self, prep_res, exc):
+        print(f&quot;All retries failed due to: {exc}. Using fallback data.&quot;)
+        return &quot;Fallback search result&quot;
+</code></pre>
+<hr />
+<h3>Looking Ahead</h3>
+<p>Now that you know how individual tasks can protect themselves against sudden failures with built-in retries, you might wonder: what happens when you need to run the exact same operation across a whole list of items simultaneously?</p>
+<p>That brings us to the next chapter, where we look at <a href="03_batchnode.html">BatchNode</a> and how to process collections of data effortlessly.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="01_basenode.html">&larr; BaseNode</a></span>
+    <span><a href="03_batchnode.html">BatchNode &rarr;</a></span>
+  </nav>
+</body>
+</html>

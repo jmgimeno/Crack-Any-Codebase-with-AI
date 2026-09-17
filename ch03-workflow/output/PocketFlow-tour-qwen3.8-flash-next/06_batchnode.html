@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BatchNode — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 6: BatchNode</h1>
+<p>Imagine you built a tiny badge machine.</p>
+<p>It expects one blank badge. You feed it in, it stamps the company logo, and one finished badge comes out. That is easy to picture.</p>
+<p>Now someone drops 200 badges on the table and says:</p>
+<blockquote>
+<p>Stamp them all.</p>
+</blockquote>
+<p>Do you glue a giant loop onto the machine? Do you teach the machine how to count badges? Do you make it decide what to do after each stamp?</p>
+<p>You already know from <a href="02_node.html">Node</a> that a normal node is one station doing one job. But sometimes the whiteboard from <a href="01_shared.html">shared</a> contains a whole list of items, and every item needs the same kind of work.</p>
+<p>That is where <strong>BatchNode</strong> comes in.</p>
+<p>A BatchNode is like a badge machine with a tray feeder. It takes a tray of badges, stamps one badge at a time using the same stamp, and then hands the finished pile to an inspector.</p>
+<h2>The three jobs change shape</h2>
+<p>In <a href="02_node.html">Node</a>, the pattern was:</p>
+<ol>
+<li><code>prep</code> reads one input from <code>shared</code>.</li>
+<li><code>exec</code> does the main work.</li>
+<li><code>post</code> writes the result back and returns a routing word.</li>
+</ol>
+<p>With a BatchNode, the three jobs are still there, but their shapes change.</p>
+<p>First, <code>prep</code> returns a list of items:</p>
+<pre><code class="language-python">from pocketflow import BatchNode
+
+class StampBadges(BatchNode):
+    def prep(self, shared):
+        return shared[&quot;badges&quot;]
+</code></pre>
+<p>That is the tray.</p>
+<p>The node does not stamp anything yet. It just says:</p>
+<blockquote>
+<p>Here are the badges waiting on the table.</p>
+</blockquote>
+<p>Next, <code>exec</code> still processes one item at a time:</p>
+<pre><code class="language-python">    def exec(self, badge):
+        return stamp(badge)
+</code></pre>
+<p>This is important.</p>
+<p>Even though <code>prep</code> returned many badges, <code>exec</code> only sees one badge. It does not need to loop over the whole tray. The BatchNode handles that for you.</p>
+<p>Finally, <code>post</code> receives all the finished results together:</p>
+<pre><code class="language-python">    def post(self, shared, prep_res, exec_res_list):
+        shared[&quot;stamped&quot;] = exec_res_list
+</code></pre>
+<p>The third argument is a list of results, in the same order as the items from <code>prep</code>.</p>
+<p>So the BatchNode pattern is:</p>
+<blockquote>
+<p><code>prep</code> gives me a tray.<br />
+<code>exec</code> stamps one badge.<br />
+<code>post</code> collects all stamped badges.</p>
+</blockquote>
+<h2>What Pocket Flow does for you</h2>
+<p>The whole BatchNode trick is surprisingly small.</p>
+<p>In the Pocket Flow source, it looks roughly like this:</p>
+<pre><code class="language-python">class BatchNode(Node):
+    def _exec(self, items):
+        return [super(BatchNode, self)._exec(i) for i in (items or [])]
+</code></pre>
+<p>That line does three useful things.</p>
+<p>First, if <code>prep</code> returns nothing, it uses an empty list:</p>
+<pre><code class="language-python">(items or [])
+</code></pre>
+<p>So a missing tray becomes “no badges,” not a crash.</p>
+<p>Second, it calls the normal Node execution path for each item:</p>
+<pre><code class="language-python">super(BatchNode, self)._exec(i)
+</code></pre>
+<p>That means your <code>exec</code> method still runs once per item.</p>
+<p>Third, it collects every result into one list.</p>
+<p>The BatchNode does not change your node logic. It changes how many times the main work is repeated.</p>
+<pre class="mermaid">sequenceDiagram
+participant C as Caller
+participant F as Flow
+participant B as BatchNode
+participant S as Shared
+participant W as ItemWorker
+C->>F: Start run with list of items
+F->>B: Run current node
+B->>S: Read items from shared board
+B->>W: Process each item one by one
+W-->>B: Return result for one item
+B-->>F: Return all results together
+</pre>
+<p>The flow sees one BatchNode. The BatchNode internally repeats the same work for every item.</p>
+<h2>A real example: evaluating many resumes</h2>
+<p>Suppose a previous node read resume files and stored them in <code>shared</code>:</p>
+<pre><code class="language-python">shared[&quot;resumes&quot;] = {
+    &quot;alice.txt&quot;: &quot;...&quot;,
+    &quot;bob.txt&quot;: &quot;...&quot;
+}
+</code></pre>
+<p>A BatchNode can evaluate each resume one by one.</p>
+<p>First, it prepares the list of items:</p>
+<pre><code class="language-python">class EvaluateResumesNode(BatchNode):
+    def prep(self, shared):
+        return list(shared[&quot;resumes&quot;].items())
+</code></pre>
+<p>Now <code>prep</code> returns pairs like:</p>
+<pre><code class="language-python">(&quot;alice.txt&quot;, &quot;...&quot;)
+</code></pre>
+<p>Then <code>exec</code> evaluates one resume:</p>
+<pre><code class="language-python">    def exec(self, resume_item):
+        filename, content = resume_item
+        return filename, evaluate_resume(content)
+</code></pre>
+<p>Notice what <code>exec</code> does not do.</p>
+<p>It does not loop over all resumes.<br />
+It does not read from <code>shared</code>.<br />
+It does not write to <code>shared</code>.</p>
+<p>It just answers one question:</p>
+<blockquote>
+<p>What should I do with this one resume?</p>
+</blockquote>
+<p>Finally, <code>post</code> combines the results:</p>
+<pre><code class="language-python">    def post(self, shared, prep_res, exec_res_list):
+        shared[&quot;evaluations&quot;] = dict(exec_res_list)
+</code></pre>
+<p>If each result is a pair like <code>(filename, evaluation)</code>, then <code>dict(exec_res_list)</code> turns the list into a dictionary.</p>
+<p>This is a very common BatchNode shape:</p>
+<ul>
+<li><code>prep</code> returns identifiable items.</li>
+<li><code>exec</code> returns one result plus its identity.</li>
+<li><code>post</code> reassembles everything into a useful collection.</li>
+</ul>
+<h2>A batch item can return more than one thing</h2>
+<p>Sometimes each input produces multiple outputs.</p>
+<p>For example, in the RAG indexing flow, one document may become many chunks. A BatchNode is perfect for that.</p>
+<p>First, it reads all documents:</p>
+<pre><code class="language-python">class ChunkDocumentsNode(BatchNode):
+    def prep(self, shared):
+        return shared[&quot;texts&quot;]
+
+    def exec(self, text):
+        return fixed_size_chunk(text)
+</code></pre>
+<p>Each <code>exec</code> call returns a list of chunks for one document.</p>
+<p>So after the batch runs, <code>post</code> receives a list of lists:</p>
+<pre><code class="language-python">[
+    [&quot;chunk 1&quot;, &quot;chunk 2&quot;],
+    [&quot;chunk 3&quot;, &quot;chunk 4&quot;, &quot;chunk 5&quot;]
+]
+</code></pre>
+<p>Then <code>post</code> can flatten them into one final list:</p>
+<pre><code class="language-python">    def post(self, shared, prep_res, exec_res_list):
+        chunks = []
+        for result in exec_res_list:
+            chunks.extend(result)
+        shared[&quot;texts&quot;] = chunks
+</code></pre>
+<p>This is another useful BatchNode pattern:</p>
+<blockquote>
+<p>Each item can produce its own little pile of results.<br />
+<code>post</code> decides how to combine those piles.</p>
+</blockquote>
+<h2>The flow still routes only once</h2>
+<p>A BatchNode runs many items, but it is still one node in the graph.</p>
+<p>That means routing happens after the whole batch finishes.</p>
+<p>For example:</p>
+<pre><code class="language-python">chunk - &quot;embed&quot; &gt;&gt; embed_docs
+offline_flow = Flow(start=chunk)
+</code></pre>
+<p>The <a href="04_flow.html">Flow</a> does not go to the next node after every document chunk. It waits for <code>ChunkDocumentsNode</code> to finish all items, then reads the action returned by <code>post</code>.</p>
+<p>The routing rules from <a href="03_successors.html">successors</a> still apply exactly as before.</p>
+<p>A BatchNode may process 10 documents, 500 images, or 1,000 text fragments, but from the outside it is still just one station with one exit sign.</p>
+<h2>Where should context live?</h2>
+<p>In a normal <a href="02_node.html">Node</a>, <code>prep</code> and <code>post</code> can read and write <code>shared</code>. But <code>exec</code> does not receive <code>shared</code>.</p>
+<p>A BatchNode follows the same rule.</p>
+<p>This is good because it keeps each item’s work simple. But it also means you need to pass context into the item itself, or use <a href="05_params.html">params</a> for settings that stay the same across the batch.</p>
+<p>For example:</p>
+<pre><code class="language-python">    def exec(self, text):
+        language = self.params.get(&quot;language&quot;, &quot;en&quot;)
+        return translate(text, language)
+</code></pre>
+<p>Here, <code>text</code> is the item from the tray.<br />
+The language setting comes from params.</p>
+<p>But if each resume needs a different job description, you should pack that job description into the item:</p>
+<pre><code class="language-python">    def prep(self, shared):
+        jobs = shared[&quot;job_descriptions&quot;]
+        return [
+            (filename, content, jobs[filename])
+            for filename, content in shared[&quot;resumes&quot;].items()
+        ]
+</code></pre>
+<p>Then <code>exec</code> receives everything it needs for that one item.</p>
+<p>A good rule:</p>
+<blockquote>
+<p>If every item uses the same setting, use params.<br />
+If each item needs its own context, put that context inside the item.</p>
+</blockquote>
+<h2>Retries happen per item</h2>
+<p>Because BatchNode calls the normal Node execution path for each item, retries apply to each item individually.</p>
+<p>You can create a batch node like this:</p>
+<pre><code class="language-python">translate = TranslateMarkdown(max_retries=3, wait=1)
+</code></pre>
+<p>If one translation call fails, Pocket Flow will retry that one item up to three times.</p>
+<p>You can also provide a fallback:</p>
+<pre><code class="language-python">class TranslateMarkdown(BatchNode):
+    def exec_fallback(self, item, exc):
+        return {&quot;item&quot;: item, &quot;error&quot;: str(exc)}
+</code></pre>
+<p>This is very useful for batches.</p>
+<p>Without a fallback, one stubborn bad item can stop the whole tray from finishing. With a fallback, that item becomes an error result, and the rest of the batch can continue.</p>
+<p>Think of it like this:</p>
+<blockquote>
+<p>One badge has a crooked stamp.<br />
+You put it in the “needs review” bin.<br />
+The machine keeps stamping the other badges.</p>
+</blockquote>
+<h2>A few gotchas to avoid</h2>
+<h3>1. <code>exec</code> does not see the whole list</h3>
+<p>This is easy to forget.</p>
+<p>If you need to compare item 3 with item 7, a BatchNode may be the wrong shape. Or you can do that later in another <a href="02_node.html">Node</a> or in <code>post</code>.</p>
+<p>Inside <code>exec</code>, think:</p>
+<blockquote>
+<p>I only have this one badge.</p>
+</blockquote>
+<h3>2. Return a real list from <code>prep</code> when possible</h3>
+<p>Avoid returning a one-time iterator.</p>
+<p>Good:</p>
+<pre><code class="language-python">def prep(self, shared):
+    return list(shared[&quot;resumes&quot;].items())
+</code></pre>
+<p>Why? Because <code>exec</code> consumes the items, and <code>post</code> may also want to see the original items in <code>prep_res</code>. If <code>prep_res</code> is a generator, it may already be empty by the time <code>post</code> runs.</p>
+<p>A list is safer and easier to reason about.</p>
+<h3>3. Strings are iterable too</h3>
+<p>If you return a string from <code>prep</code>, Python will happily treat each character as an item.</p>
+<p>That usually surprises people.</p>
+<p>If you meant to process lines, say so:</p>
+<pre><code class="language-python">return shared[&quot;text&quot;].splitlines()
+</code></pre>
+<p>If you meant to process paragraphs:</p>
+<pre><code class="language-python">return shared[&quot;text&quot;].split(&quot;\n\n&quot;)
+</code></pre>
+<p>The BatchNode will stamp whatever tray you give it. So make sure the tray contains badges, not crumbs.</p>
+<h3>4. Normal BatchNode is sequential</h3>
+<p>A standard BatchNode processes items one after another. It is a single machine with a feeder, not ten machines running side by side.</p>
+<p>That keeps the model simple and predictable. If you need asynchronous parallel processing, you will meet that idea later in <a href="08_asyncnode.html">AsyncNode</a>.</p>
+<h3>5. Keep identity with each result</h3>
+<p>If your items are anonymous strings, debugging becomes painful.</p>
+<p>Instead of returning only a translation:</p>
+<pre><code class="language-python">return translate(text)
+</code></pre>
+<p>It is often better to return the input and output together:</p>
+<pre><code class="language-python">    def exec(self, item):
+        name, text = item
+        return {&quot;name&quot;: name, &quot;translated&quot;: translate(text)}
+</code></pre>
+<p>Then <code>post</code> can save a useful report:</p>
+<pre><code class="language-python">    def post(self, shared, prep_res, exec_res_list):
+        pairs = zip(prep_res, exec_res_list)
+        shared[&quot;pairs&quot;] = list(pairs)
+</code></pre>
+<p>The machine should not just stamp badges. It should keep track of which badge came out of which blank.</p>
+<h2>The mental model to keep</h2>
+<p>When you see <code>BatchNode</code>, think:</p>
+<blockquote>
+<p>This is a factory machine with a tray feeder.</p>
+</blockquote>
+<p>It has three simple behaviors:</p>
+<ol>
+<li>Load the tray from <code>shared</code>.</li>
+<li>Stamp one item at a time using the same work.</li>
+<li>Collect all stamped items and write them back.</li>
+</ol>
+<p>That is it.</p>
+<p>You do not need to write the loop yourself.<br />
+You do not need to make <code>exec</code> handle the whole list.<br />
+You do not need to change how routing works after the batch finishes.</p>
+<p>A BatchNode lets one station process many similar jobs while keeping the clean <a href="02_node.html">Node</a> pattern you already know.</p>
+<h2>Where this goes next</h2>
+<p>BatchNode is great when every item needs the same single station.</p>
+<p>But what if each item needs a whole little graph? What if each pass through that graph should carry its own instruction card from <a href="05_params.html">params</a>?</p>
+<p>That is the job of the next chapter: <a href="07_batchflow.html">BatchFlow</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="05_params.html">&larr; params</a></span>
+    <span><a href="07_batchflow.html">BatchFlow &rarr;</a></span>
+  </nav>
+</body>
+</html>

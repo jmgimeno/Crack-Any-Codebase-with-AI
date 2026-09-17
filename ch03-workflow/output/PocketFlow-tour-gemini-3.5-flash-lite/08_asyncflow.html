@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AsyncFlow — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 8: AsyncFlow</h1>
+<p>Imagine you are managing an international shipping hub where some packages require lightning-fast automated barcode scanners while other oversized crates require careful, manual human inspection. If you forced your entire warehouse to freeze up and wait for the manual inspections to finish before processing any automated boxes, your entire logistics network would grind to a frustrating halt. You need an asynchronous project manager who can smoothly coordinate both fast synchronous stations and non-blocking asynchronous nodes within a single, dynamic workflow graph.</p>
+<p>As we saw in <a href="04_flow.html">Flow</a>, standard orchestration chains multiple nodes into a directional pipeline, routing tasks based on action results. But what happens when your application mixes synchronous utility calls with slow, non-blocking network operations across a complex network?</p>
+<p>That is where <code>AsyncFlow</code> comes in. It serves as an asynchronous project manager efficiently steering event-driven operations across a complex workflow graph without blocking the main thread.</p>
+<hr />
+<h3>The Non-Blocking Project Manager</h3>
+<p><code>AsyncFlow</code> inherits from both <a href="04_flow.html">Flow</a> and <a href="06_asyncnode.html">AsyncNode</a>, combining directional graph orchestration with non-blocking execution. When you run an async flow, its internal orchestrator inspects each node dynamically: if a station is asynchronous, it awaits its completion; if a station is synchronous, it executes normally.</p>
+<p>Here is how simple it is to set up a mixed asynchronous workflow:</p>
+<pre><code class="language-python">from pocketflow import AsyncFlow, AsyncNode, Node
+
+class FastSyncCheck(Node):
+    def prep(self, shared):
+        return shared.get(&quot;data&quot;)
+    def exec(self, prep_res):
+        return prep_res.strip()
+    def post(self, shared, prep_res, exec_res):
+        shared[&quot;clean&quot;] = exec_res
+        return &quot;fetch&quot;
+</code></pre>
+<p>Next, we attach an asynchronous node to handle the non-blocking network request:</p>
+<pre><code class="language-python">import asyncio
+
+class SlowAsyncFetch(AsyncNode):
+    async def prep_async(self, shared):
+        return shared.get(&quot;clean&quot;)
+        
+    async def exec_async(self, prep_res):
+        await asyncio.sleep(1) # Simulate slow API call
+        return f&quot;Response for {prep_res}&quot;
+        
+    async def post_async(self, shared, prep_res, exec_res):
+        shared[&quot;result&quot;] = exec_res
+        return &quot;done&quot;
+</code></pre>
+<p>Finally, we wire them together into an <code>AsyncFlow</code>:</p>
+<pre><code class="language-python">def create_mixed_flow():
+    check = FastSyncCheck()
+    fetch = SlowAsyncFetch()
+    
+    check - &quot;fetch&quot; &gt;&gt; fetch
+    
+    return AsyncFlow(start=check)
+</code></pre>
+<hr />
+<h3>How AsyncFlow Orchestrates Execution</h3>
+<p>To visualize how an asynchronous project manager delegates tasks between synchronous and non-blocking stations, let's look at the orchestration sequence:</p>
+<pre class="mermaid">sequenceDiagram
+    participant Manager as AsyncFlow
+    participant Sync as Sync Node
+    participant Async as Async Node
+    participant Store as Shared Store
+    
+    Manager->>Sync: Run sync node
+    Sync->>Store: Read and update data
+    Sync->>Manager: Return action string
+    Manager->>Async: Await async node execution
+    Async->>Store: Read and update data
+    Async->>Manager: Return action string
+</pre>
+<p>When you invoke <code>run_async</code> on your <code>AsyncFlow</code>, the orchestrator steps through the graph, seamlessly switching between standard execution and non-blocking <code>await</code> calls based on the node's type.</p>
+<hr />
+<h3>Looking Ahead</h3>
+<p>Congratulations! You have journeyed all the way from individual assembly-line workers in <a href="01_basenode.html">BaseNode</a> up to complex asynchronous orchestrators in <code>AsyncFlow</code>. You now have the full toolkit needed to build lightning-fast, resilient, and scalable LLM applications with PocketFlow.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="07_asyncparallelbatchnode.html">&larr; AsyncParallelBatchNode</a></span>
+    <span>&nbsp;</span>
+  </nav>
+</body>
+</html>

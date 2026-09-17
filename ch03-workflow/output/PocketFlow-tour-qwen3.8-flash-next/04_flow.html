@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flow — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 4: Flow</h1>
+<p>You already have the pieces.</p>
+<p>A <a href="02_node.html">Node</a> is one station that reads from the shared board, does work, and returns a routing word.</p>
+<p><a href="03_successors.html">successors</a> are the doors above each station: <code>&quot;search&quot;</code>, <code>&quot;answer&quot;</code>, <code>&quot;default&quot;</code>, <code>&quot;done&quot;</code>.</p>
+<p>But who walks the corridor?</p>
+<p>If you run a single node directly, Pocket Flow warns you that it will not follow successors. The nodes can say what should happen next, but nobody is moving the run from one door to another.</p>
+<p>That job belongs to <strong>Flow</strong>.</p>
+<p>A flow is like a tour guide with a map. It does not decide where to go. It only follows the signs:</p>
+<ol>
+<li>Start at the first stop.</li>
+<li>Ask that node what should happen next.</li>
+<li>Move to the matching successor.</li>
+<li>Repeat until there is no next stop.</li>
+</ol>
+<h2>A flow starts somewhere</h2>
+<p>In the research agent, three nodes are connected like this:</p>
+<pre><code class="language-python">decide - &quot;search&quot; &gt;&gt; search
+decide - &quot;answer&quot; &gt;&gt; answer
+search - &quot;decide&quot; &gt;&gt; decide
+</code></pre>
+<p>Those lines only build doors. They do not start the run.</p>
+<p>To make a runnable tour, you choose a starting node:</p>
+<pre><code class="language-python">return Flow(start=decide)
+</code></pre>
+<p>That <code>Flow</code> object now knows where the tour begins. The rest of the path comes from each node’s successor table.</p>
+<h2>Running the whole tour</h2>
+<p>The main program creates the flow and runs it with some shared state:</p>
+<pre><code class="language-python">shared = {&quot;question&quot;: question}
+agent_flow.run(shared)
+print(shared.get(&quot;answer&quot;, &quot;No answer found&quot;))
+</code></pre>
+<p>The same <a href="01_shared.html">shared</a> board travels through every node. The flow does not carry the final answer directly back to the caller. It returns the last routing word, while useful results live on the whiteboard.</p>
+<h2>The loop that runs the graph</h2>
+<p>Under the hood, a flow repeatedly asks: “What is the current node? What action did it return? Which door matches?”</p>
+<p>A simplified version looks like this:</p>
+<pre><code class="language-python">curr = copy.copy(self.start_node)
+action = None
+while curr:
+    action = curr._run(shared)
+    nxt = self.get_next_node(curr, action)
+    curr = copy.copy(nxt) if nxt else None
+return action
+</code></pre>
+<p>Read it like a tour guide checking the map.</p>
+<p>First, it starts at <code>start_node</code>.</p>
+<p>Then it runs the current node with <code>_run</code>. That is still the <a href="02_node.html">Node</a> pattern you already know: gather inputs, do work, write state, return an action.</p>
+<p>Next, it asks the successor table for the next node. If the node returned <code>&quot;search&quot;</code>, the flow looks for a door labeled <code>&quot;search&quot;</code>. If there is no action, it tries the default door.</p>
+<p>If there is no matching door, the loop ends.</p>
+<pre class="mermaid">sequenceDiagram
+participant C as Caller
+participant F as Flow
+participant N as Node
+participant S as Shared
+C->>F: Run flow with shared board
+F->>N: Run current node
+N->>S: Read and write notes
+N-->>F: Return action word
+F->>N: Move to matching next node
+</pre>
+<p>That is the whole orchestration idea. No giant <code>if</code> chain. No hidden scheduler. Just “run this node, follow its door.”</p>
+<h2>Why does it copy nodes?</h2>
+<p>The simplified loop uses <code>copy.copy</code>.</p>
+<p>This keeps each run from permanently decorating the original graph with temporary settings. The flow can attach parameters to a copied runner without changing the blueprint you built earlier.</p>
+<p>You will meet those parameters properly in <a href="05_params.html">params</a>. For now, think of the copy as a temporary tour badge. It lets one run carry its own context while the original map stays clean for the next run.</p>
+<h2>A flow can be a node</h2>
+<p>Here is the fun part: <code>Flow</code> itself behaves like a node.</p>
+<p>That means a whole subflow can sit inside a larger flow, like a guided side trip inside a bigger tour.</p>
+<p>In the coding agent example, patching a file is split into three small nodes:</p>
+<pre><code class="language-python">pr &gt;&gt; pv &gt;&gt; pa
+
+class PatchFile(Flow):
+    def __init__(self): super().__init__(start=pr)
+</code></pre>
+<p>Then the outer flow connects <code>PatchFile</code> like any other node:</p>
+<pre><code class="language-python">decide - &quot;patch_file&quot; &gt;&gt; PatchFile() &gt;&gt; compact
+</code></pre>
+<p>From the outer flow’s point of view, <code>PatchFile</code> is just one stop. But when that stop is chosen, the inner flow runs its own little graph: read, validate, apply.</p>
+<p>After the subflow finishes, control returns to the outer flow and continues through whatever door comes next.</p>
+<h2>A nested flow can also route</h2>
+<p>Because a flow is node-like, it can have outside doors too.</p>
+<p>Inside, it may run many nodes. Outside, it still returns one final routing word.</p>
+<p>By default, a flow’s <code>post</code> returns the last action produced inside its graph. You can override that behavior to write results into <a href="01_shared.html">shared</a> and choose what the outer flow should do next.</p>
+<p>If the nested flow returns nothing, the parent flow treats that as the default path, just like with an ordinary node.</p>
+<p>That is why you can build large systems from smaller flows without losing clarity. Each subflow hides its internal complexity but still exposes one simple handoff to the outside world.</p>
+<h2>Linear flows are just boring tours</h2>
+<p>Not every flow needs branching or looping.</p>
+<p>A RAG indexing flow may simply chain nodes together:</p>
+<pre><code class="language-python">chunk_docs_node &gt;&gt; embed_docs_node &gt;&gt; create_index_node
+offline_flow = Flow(start=chunk_docs_node)
+</code></pre>
+<p>Each node returns nothing, so each one asks for the default door. The tour guide walks straight ahead until there is no next stop.</p>
+<p>That is often all you need for simple pipelines: read, transform, write.</p>
+<h2>When does a flow stop?</h2>
+<p>A flow stops when there is no next node to run.</p>
+<p>This can happen in two common ways.</p>
+<p>First, the current node has no successors at all. That makes it a terminal stop.</p>
+<p>Second, the node returns an action that does not match any door. In that case, Pocket Flow warns you and stops. This usually means there is a typo in the action name or a missing connection.</p>
+<p>The research agent ends when the answer node finishes. It returns <code>&quot;done&quot;</code>, but it has no successor for that word. The tour guide checks the map, finds no next door, and quietly walks away.</p>
+<h2>What flows are good at</h2>
+<p>Flows give you three useful things:</p>
+<h3>1. Repeated stepping</h3>
+<p>They keep running nodes until the graph is done. That makes loops natural, like searching again and again until enough information exists.</p>
+<h3>2. Clean separation</h3>
+<p>Nodes decide what to do next. Flows follow the routing table. You do not need one giant function that both performs work and controls every branch.</p>
+<h3>3. Composable subflows</h3>
+<p>A flow can be a node inside another flow. That lets you build small reusable tours and plug them into bigger systems.</p>
+<h2>Where this goes next</h2>
+<p>You now know how the tour guide moves through the graph: start at one node, follow each returned action, and stop when there is no matching door.</p>
+<p>But some nodes need more than shared run data. They need configuration: which filter to apply, which file to read, which subflow to use.</p>
+<p>That distinction is what <a href="05_params.html">params</a> explains next.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="03_successors.html">&larr; successors</a></span>
+    <span><a href="05_params.html">params &rarr;</a></span>
+  </nav>
+</body>
+</html>

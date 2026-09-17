@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BatchFlow — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 5: BatchFlow</h1>
+<p>Imagine you are running a custom printing factory. Instead of taking a single order for custom t-shirts, a major corporate client sends you a list of fifty separate branch offices, each with its own specific logo design, color scheme, and delivery address. If you tried to handle this with a single worker node or even a basic collection loop, you would quickly find yourself drowning in conditional logic, trying to remember which style guide belongs to which branch while running your multi-step proofing and validation pipeline.</p>
+<p>As we saw in <a href="04_flow.html">Flow</a>, you can connect multiple nodes into a clean, directional pipeline where the output of one station determines the next. But what happens when you need to run that <em>entire multi-step flow</em> repeatedly across a whole list of separate batch orders, feeding customized parameters into each run?</p>
+<p>That is where <code>BatchFlow</code> comes in. It acts as a specialized pipeline runner that takes a batch of input parameters and executes a complete sub-flow for each item sequentially, exactly like running a complete manufacturing pipeline repeatedly for every batch order received.</p>
+<hr />
+<h3>The Batch Pipeline Runner</h3>
+<p><code>BatchFlow</code> inherits from <code>Flow</code>, meaning it keeps all the powerful orchestration capabilities you learned about previously. However, it overrides how data is initialized and executed: instead of running your graph once with global settings, it pulls a list of parameter dictionaries and executes the entire sub-flow independently for every single item.</p>
+<p>Here is how simple it is to define a batch flow that processes a list of order parameters:</p>
+<pre><code class="language-python">from pocketflow import BatchFlow, Flow
+
+class OrderBatchFlow(BatchFlow):
+    def prep(self, shared):
+        return shared.get(&quot;batch_orders&quot;, [])
+</code></pre>
+<p>Behind the scenes, <code>BatchFlow</code> iterates over each parameter dictionary returned by <code>prep</code>, injecting those specific values into the flow's execution engine for that iteration.</p>
+<hr />
+<h3>How Batch Flows Execute</h3>
+<p>To visualize how data moves through a <code>BatchFlow</code>, let's look at the sequence of operations:</p>
+<pre class="mermaid">sequenceDiagram
+    participant S as Shared Store
+    participant B as BatchFlow
+    participant F as Flow Orchestrator
+    
+    S->>B: Provide list of batch orders
+    B->>F: Run sub-flow for first parameter set
+    F->>B: Return execution result
+    B->>F: Run sub-flow for next parameter set
+</pre>
+<p>When you invoke the batch flow, it loops through your collection of input items, merging any global flow parameters with the specific batch parameters for each individual run.</p>
+<hr />
+<h3>Looking Ahead</h3>
+<p>Now that you know how to execute entire multi-step flows sequentially across a batch of independent inputs using <code>BatchFlow</code>, you might wonder: what happens when network latency or external API calls slow down your pipeline, and you need to handle operations asynchronously?</p>
+<p>That brings us to the next chapter, where we look at <a href="06_asyncnode.html">AsyncNode</a> and how to bring non-blocking execution to your nodes.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="04_flow.html">&larr; Flow</a></span>
+    <span><a href="06_asyncnode.html">AsyncNode &rarr;</a></span>
+  </nav>
+</body>
+</html>

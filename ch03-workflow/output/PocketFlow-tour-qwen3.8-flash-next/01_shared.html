@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>shared — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 1: shared</h1>
+<p>Imagine you are building a tiny research assistant.</p>
+<p>It needs to do two things:</p>
+<ol>
+<li>Search the web for information.</li>
+<li>Answer the user’s question using what it found.</li>
+</ol>
+<p>The search step knows the question.<br />
+The answer step also needs the question and the search results.</p>
+<p>So how do these separate steps talk to each other?</p>
+<p>One lazy answer is to use a global variable:</p>
+<pre><code class="language-python">question = &quot;Who won the Nobel Prize in Physics 2024?&quot;
+answer = call_llm(&quot;Summarize: &quot; + question)
+</code></pre>
+<p>That works for one tiny script.</p>
+<p>But what if two people ask different questions at the same time?<br />
+What if you want to test the flow with many inputs?<br />
+What if one step fails and leaves the global variable in a weird state?</p>
+<p>Now the program starts feeling like everyone scribbling on the same office wall. Notes get overwritten. Old notes confuse new workers. Nobody knows who wrote what.</p>
+<p>Pocket Flow gives you something better: a <strong>shared whiteboard</strong> for each run.</p>
+<h2>The running whiteboard</h2>
+<p>In Pocket Flow, <code>shared</code> is an ordinary Python dictionary that gets passed through every node run.</p>
+<p>Think of it like a meeting room whiteboard.</p>
+<p>You write the question at the top:</p>
+<blockquote>
+<p>“Who won the Nobel Prize in Physics 2024?”</p>
+</blockquote>
+<p>The search worker adds notes under it:</p>
+<blockquote>
+<p>Search results found...</p>
+</blockquote>
+<p>The answer worker reads both notes and writes the final answer:</p>
+<blockquote>
+<p>The answer is...</p>
+</blockquote>
+<p>When the flow finishes, you take the whiteboard with you.</p>
+<p>In code, this looks like the agent example from the cookbook:</p>
+<pre><code class="language-python">shared = {&quot;question&quot;: question}
+agent_flow.run(shared)
+print(shared.get(&quot;answer&quot;, &quot;No answer found&quot;))
+</code></pre>
+<p>Three lines tell a big story:</p>
+<ol>
+<li><code>shared</code> starts as a dictionary containing the question.</li>
+<li>The flow runs and lets nodes read from and write to that same dictionary.</li>
+<li>After the flow finishes, the caller reads the final result from <code>shared</code>.</li>
+</ol>
+<p>The important part is that the same <code>shared</code> object travels through the run.</p>
+<pre class="mermaid">sequenceDiagram
+participant C as Caller
+participant F as Flow
+participant S as Shared
+C->>F: Run flow with shared data
+F->>S: Pass same data through every node
+S-->>C: Return final state
+</pre>
+<p>That is the core idea of <code>shared</code>.</p>
+<p>It is not magic.<br />
+It is not a database.<br />
+It is not a global variable.</p>
+<p>It is a container that you hand to the flow, and the flow hands to each node.</p>
+<h2>How a node touches the board</h2>
+<p>A <a href="02_node.html">Node</a> usually has three steps:</p>
+<ol>
+<li><code>prep</code> reads inputs from <code>shared</code>.</li>
+<li><code>exec</code> does the main work.</li>
+<li><code>post</code> writes outputs back into <code>shared</code> and chooses what happens next.</li>
+</ol>
+<p>Internally, a simple node run looks like this:</p>
+<pre><code class="language-python">def _run(self, shared):
+    p = self.prep(shared)
+    e = self._exec(p)
+    return self.post(shared, p, e)
+</code></pre>
+<p>The same <code>shared</code> dictionary is passed into <code>prep</code> and <code>post</code>.</p>
+<p>A <a href="04_flow.html">Flow</a> does the same thing over and over as it moves from node to node. It keeps passing the same board forward.</p>
+<h2>Reading from shared</h2>
+<p>In the research agent, the first node decides whether to search or answer.</p>
+<p>Before it can decide, it needs to know:</p>
+<ul>
+<li>What is the question?</li>
+<li>What has already been searched?</li>
+</ul>
+<p>It reads those notes from <code>shared</code>:</p>
+<pre><code class="language-python">def prep(self, shared):
+    context = shared.get(&quot;context&quot;, &quot;No previous search&quot;)
+    question = shared[&quot;question&quot;]
+    return question, context
+</code></pre>
+<p>Notice two things.</p>
+<p>First, the node does not need to know where the question came from. It only knows that there should be a note called <code>&quot;question&quot;</code>.</p>
+<p>Second, <code>shared.get(&quot;context&quot;, ...)</code> is used because early in the run there may not be any previous search yet. That is like checking whether someone has already written on the board before adding your own note.</p>
+<h2>Writing to shared</h2>
+<p>After the decision node runs, it writes its next action back onto the board:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    if exec_res[&quot;action&quot;] == &quot;search&quot;:
+        shared[&quot;search_query&quot;] = exec_res[&quot;search_query&quot;]
+    else:
+        shared[&quot;context&quot;] = exec_res[&quot;answer&quot;]
+    return exec_res[&quot;action&quot;]
+</code></pre>
+<p>This does two jobs at once.</p>
+<p>It stores information for the next node:</p>
+<pre><code class="language-python">shared[&quot;search_query&quot;] = exec_res[&quot;search_query&quot;]
+</code></pre>
+<p>And it returns a routing signal:</p>
+<pre><code class="language-python">return exec_res[&quot;action&quot;]
+</code></pre>
+<p>The returned value is not automatically saved into <code>shared</code>. It tells the flow which successor to run next. The <a href="03_successors.html">successors</a> chapter explains how that string becomes a path through the graph.</p>
+<h2>Accumulating history</h2>
+<p>After searching, the search node needs to save what it found.</p>
+<p>It does not replace the whole board. It appends a new note:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    previous = shared.get(&quot;context&quot;, &quot;&quot;)
+    note = &quot;SEARCH: &quot; + shared[&quot;search_query&quot;] + &quot;\nRESULTS: &quot; + exec_res
+    shared[&quot;context&quot;] = previous + &quot;\n\n&quot; + note
+    return &quot;decide&quot;
+</code></pre>
+<p>Now <code>shared[&quot;context&quot;]</code> becomes a running history.</p>
+<p>It might look like this after one search:</p>
+<pre><code class="language-text">SEARCH: Nobel Prize in Physics 2024
+RESULTS: ...
+</code></pre>
+<p>After another search, it grows.</p>
+<p>This is very common in agent-style flows: the board accumulates context as the system works.</p>
+<h2>Writing the final answer</h2>
+<p>Finally, the answer node reads the question and accumulated context, produces an answer, and writes it back:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    shared[&quot;answer&quot;] = exec_res
+    return &quot;done&quot;
+</code></pre>
+<p>That is why the caller can do this after the flow finishes:</p>
+<pre><code class="language-python">print(shared.get(&quot;answer&quot;, &quot;No answer found&quot;))
+</code></pre>
+<p>The answer was not returned directly by <code>flow.run()</code>.<br />
+It was written onto the shared whiteboard during the run.</p>
+<h2>What can live on the whiteboard?</h2>
+<p>Because <code>shared</code> is just a dictionary, it can hold almost anything Python can put into a value:</p>
+<ul>
+<li>strings</li>
+<li>numbers</li>
+<li>lists</li>
+<li>dictionaries</li>
+<li>objects</li>
+<li>queues</li>
+<li>database handles</li>
+<li>embeddings</li>
+<li>search results</li>
+<li>intermediate scratch notes</li>
+</ul>
+<p>For example, a batch node may read a list of items from <code>shared</code>:</p>
+<pre><code class="language-python">def prep(self, shared):
+    return list(shared[&quot;resumes&quot;].items())
+</code></pre>
+<p>Later, it may write evaluations back into <code>shared</code>. That pattern appears in <a href="06_batchnode.html">BatchNode</a> and <a href="07_batchflow.html">BatchFlow</a>.</p>
+<p>Even asynchronous multi-agent systems can put communication channels on the board:</p>
+<pre><code class="language-python">shared = {
+    &quot;target_word&quot;: &quot;nostalgic&quot;,
+    &quot;forbidden_words&quot;: [&quot;memory&quot;, &quot;past&quot;],
+    &quot;hinter_queue&quot;: asyncio.Queue(),
+    &quot;guesser_queue&quot;: asyncio.Queue()
+}
+</code></pre>
+<p>Here, <code>shared</code> does not just carry data. It carries coordination objects. Two agents can later wait on queues stored in the same run state. You will see this more clearly in <a href="08_asyncnode.html">AsyncNode</a> and <a href="09_asyncflow.html">AsyncFlow</a>.</p>
+<h2>Why not global variables?</h2>
+<p>The biggest reason is isolation.</p>
+<p>If every run writes to the same global wall, runs interfere with each other.</p>
+<p>With <code>shared</code>, you can create a fresh board for each request:</p>
+<pre><code class="language-python">run_1 = {&quot;question&quot;: &quot;Who won Nobel Prize?&quot;}
+run_2 = {&quot;question&quot;: &quot;What is RAG?&quot;}
+flow.run(run_1)
+flow.run(run_2)
+</code></pre>
+<p>Now the first run and second run have their own state.</p>
+<p>This gives you three nice properties:</p>
+<h3>1. Better testing</h3>
+<p>You can pass in a small dictionary and inspect what comes out.</p>
+<p>No need to reset hidden globals between tests.</p>
+<h3>2. Safer concurrency</h3>
+<p>If two requests happen at the same time, they can each get their own <code>shared</code> dictionary.</p>
+<p>That is much safer than having them both scribble on the same global variable.</p>
+<h3>3. Clearer data flow</h3>
+<p>The board makes it easy to ask:</p>
+<ul>
+<li>What did this node read?</li>
+<li>What did this node write?</li>
+<li>What will the next node see?</li>
+</ul>
+<p>It is still possible to make messy code, but the structure gives you a natural place to keep run state.</p>
+<h2>Shared versus params</h2>
+<p>Do not confuse <code>shared</code> with parameters.</p>
+<p>A <a href="05_params.html">params</a> value is more like configuration for a node: “use this filter,” “read this file,” “run this subflow.”</p>
+<p><code>shared</code> is the working data of the run: “here is the question,” “here are search results,” “here is the history,” “here is the answer.”</p>
+<p>A rough rule:</p>
+<ul>
+<li>If it describes <strong>how</strong> to run, it may belong in params.</li>
+<li>If it is produced or consumed during execution, it probably belongs in <code>shared</code>.</li>
+</ul>
+<h2>A few good habits</h2>
+<h3>Use clear key names</h3>
+<p>Since <code>shared</code> is just a dictionary, bad naming can create confusion.</p>
+<p>Good:</p>
+<pre><code class="language-python">shared[&quot;question&quot;]
+shared[&quot;search_query&quot;]
+shared[&quot;context&quot;]
+shared[&quot;answer&quot;]
+</code></pre>
+<p>Bad:</p>
+<pre><code class="language-python">shared[&quot;x&quot;]
+shared[&quot;temp2&quot;]
+shared[&quot;stuff&quot;]
+</code></pre>
+<p>The whiteboard works better when sticky notes have readable titles.</p>
+<h3>Use <code>.get()</code> for optional values</h3>
+<p>Not every key exists at the start of a run.</p>
+<pre><code class="language-python">context = shared.get(&quot;context&quot;, &quot;&quot;)
+</code></pre>
+<p>This is like looking at the board and saying, “If nobody wrote context yet, assume there is none.”</p>
+<h3>Keep scratch notes obvious</h3>
+<p>Some flows use temporary keys for intermediate steps:</p>
+<pre><code class="language-python">shared[&quot;_patch_content&quot;] = exec_res
+</code></pre>
+<p>The underscore signals: this is a working note, not the final answer.</p>
+<p>That kind of pattern appears in more advanced flows where one subflow needs to pass temporary state to another step.</p>
+<h3>Store history as structured data</h3>
+<p>Many agent systems keep a list of events in <code>shared</code>.</p>
+<p>For example:</p>
+<pre><code class="language-python">shared.setdefault(&quot;history&quot;, []).append({
+    &quot;tool&quot;: tool,
+    &quot;result&quot;: result
+})
+</code></pre>
+<p>This turns the whiteboard into a notebook. Later nodes can read that notebook to decide what to do next.</p>
+<h3>Be careful with shared mutable objects</h3>
+<p>If you put a list or dictionary inside <code>shared</code>, multiple nodes may mutate it.</p>
+<p>That is often exactly what you want, especially for history. But it can surprise you if two flows are running at the same time and unintentionally share the same board.</p>
+<p>For independent runs, create separate dictionaries.<br />
+For intentional coordination, design the sharing carefully, sometimes with queues.</p>
+<h2>The mental model to keep</h2>
+<p>When you see <code>shared</code>, think:</p>
+<blockquote>
+<p>“This is the whiteboard for this run.”</p>
+</blockquote>
+<p>It can carry:</p>
+<ul>
+<li>questions</li>
+<li>history</li>
+<li>search results</li>
+<li>intermediate outputs</li>
+<li>final answers</li>
+<li>queues</li>
+<li>scratch notes</li>
+</ul>
+<p>And it lets separate nodes communicate without global variables.</p>
+<p>That is a surprisingly powerful idea for such a simple dictionary.</p>
+<h2>Where this goes next</h2>
+<p>You now know what the whiteboard is and how it travels through a run.</p>
+<p>The next question is obvious:</p>
+<p>Who writes on it?</p>
+<p>That is exactly what the next chapter is about: <a href="02_node.html">Node</a>.</p>
+
+  <nav class="chapter-nav">
+    <span>&nbsp;</span>
+    <span><a href="02_node.html">Node &rarr;</a></span>
+  </nav>
+</body>
+</html>

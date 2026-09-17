@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AsyncNode — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 6: AsyncNode</h1>
+<p>Imagine you are running a bustling coffee shop counter during the morning rush. If your barista took an order, stood frozen staring at the espresso machine while it brewed, and refused to look at the next customer until the entire cup was handed over, your queue would stretch out the door and down the block. A smart barista takes an order, kicks off the brewing process, and immediately pivots to take the next customer's request while waiting.</p>
+<p>As we saw in <a href="02_node.html">Node</a> and <a href="03_batchnode.html">BatchNode</a>, standard nodes handle tasks synchronously, locking up the thread while waiting for external network responses or LLM generations. But what happens when your application needs to handle multiple slow network calls concurrently without blocking the entire program?</p>
+<p>That is where <code>AsyncNode</code> comes in. It acts as an asynchronous worker capable of multitasking while waiting for network responses or LLM generations.</p>
+<hr />
+<h3>The Non-Blocking Worker</h3>
+<p><code>AsyncNode</code> inherits from <a href="02_node.html">Node</a>, meaning it keeps all the built-in retry safety nets and fallback logic you already know. However, it introduces asynchronous equivalents for every phase of the lifecycle: <code>prep_async</code>, <code>exec_async</code>, and <code>post_async</code>.</p>
+<p>Here is how simple it is to define a non-blocking operation using Python's <code>asyncio</code>:</p>
+<pre><code class="language-python">from pocketflow import AsyncNode
+import asyncio
+
+class FetchData(AsyncNode):
+    async def prep_async(self, shared):
+        return shared.get(&quot;endpoint&quot;)
+</code></pre>
+<p>Next, the worker performs its non-blocking execution:</p>
+<pre><code class="language-python">    async def exec_async(self, prep_res):
+        # Simulate waiting for a slow network response
+        await asyncio.sleep(1)
+        return f&quot;Data from {prep_res}&quot;
+</code></pre>
+<p>Finally, the post-processing phase saves the result back to your shared state:</p>
+<pre><code class="language-python">    async def post_async(self, shared, prep_res, exec_res):
+        shared[&quot;result&quot;] = exec_res
+        return &quot;default&quot;
+</code></pre>
+<hr />
+<h3>How Async Execution Works</h3>
+<p>To visualize how an asynchronous worker handles non-blocking tasks and retries, let's look at the lifecycle sequence:</p>
+<pre class="mermaid">sequenceDiagram
+    participant S as Shared Store
+    participant N as AsyncNode
+    
+    S->>N: Provide shared state asynchronously
+    N->>N: Prepare data in prep async method
+    N->>N: Await task execution in exec async method
+    N->>S: Update shared store in post async method
+</pre>
+<p>When you invoke an <code>AsyncNode</code>, you use <code>run_async</code> instead of the standard <code>run</code> method, allowing your application to yield control back to the event loop whenever it encounters an <code>await</code> statement.</p>
+<hr />
+<h3>Looking Ahead</h3>
+<p>Now that you know how individual workers can perform non-blocking operations and multitask using <code>AsyncNode</code>, you might wonder: what happens when you want to scale this up and run multiple async nodes concurrently across a collection of items?</p>
+<p>That brings us to the next chapter, where we look at <a href="07_asyncparallelbatchnode.html">AsyncParallelBatchNode</a> and how to supercharge your performance.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="05_batchflow.html">&larr; BatchFlow</a></span>
+    <span><a href="07_asyncparallelbatchnode.html">AsyncParallelBatchNode &rarr;</a></span>
+  </nav>
+</body>
+</html>

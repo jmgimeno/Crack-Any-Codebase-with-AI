@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PocketFlow tour</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <h1>PocketFlow</h1>
+  <p class="muted">Lens: <span class="lens">beginner-tutorial</span> &middot; 8 chapters &middot; 6 files analyzed</p>
+  <p>PocketFlow is an ultra-minimalist, 100-line Python framework for orchestrating LLM workflows, agents, and pipelines using graph-based nodes and flows. It enables lightweight, zero-dependency development of complex AI applications through a clear graph abstraction.</p>
+
+  <h2>Architecture map</h2>
+  <pre class="mermaid">
+flowchart TD
+    A0["BaseNode"]
+    A1["Node"]
+    A2["BatchNode"]
+    A3["Flow"]
+    A4["BatchFlow"]
+    A5["AsyncNode"]
+    A6["AsyncParallelBatchNode"]
+    A7["AsyncFlow"]
+    A1 -- "extends" --> A0
+    A2 -- "extends" --> A1
+    A3 -- "extends" --> A0
+    A4 -- "extends" --> A3
+    A5 -- "extends" --> A1
+    A6 -- "extends" --> A5
+    A6 -- "extends" --> A2
+    A7 -- "extends" --> A3
+    A7 -- "extends" --> A5
+    A3 -- "orchestrates" --> A0
+  </pre>
+
+  <h2>Read in order</h2>
+  <ol>
+    <li><a href="01_basenode.html">BaseNode</a></li>
+    <li><a href="02_node.html">Node</a></li>
+    <li><a href="03_batchnode.html">BatchNode</a></li>
+    <li><a href="04_flow.html">Flow</a></li>
+    <li><a href="05_batchflow.html">BatchFlow</a></li>
+    <li><a href="06_asyncnode.html">AsyncNode</a></li>
+    <li><a href="07_asyncparallelbatchnode.html">AsyncParallelBatchNode</a></li>
+    <li><a href="08_asyncflow.html">AsyncFlow</a></li>
+  </ol>
+
+  <h2>Files the LLM picked</h2>
+<p>This repository is PocketFlow, an extremely minimalist (~100-line) core LLM framework centered around a Directed Graph of Nodes and Flows, accompanied by a rich cookbook of diverse design pattern examples. To understand the core architecture, we must start with the framework's primary source implementation which defines Node, BatchNode, Flow, and asynchronous variants. Alongside the base classes, we select a concrete foundational example from the cookbook, specifically the multi-node research agent pattern, to demonstrate how users subclass nodes, connect transitions via operator overloading, and manage the shared state store.</p>
+
+  <ul class="files">
+    <li><code>pocketflow/__init__.py</code></li>
+    <li><code>cookbook/pocketflow-agent/flow.py</code></li>
+    <li><code>cookbook/pocketflow-agent/nodes.py</code></li>
+    <li><code>cookbook/pocketflow-agent/utils.py</code></li>
+    <li><code>setup.py</code></li>
+    <li><code>README.md</code></li>
+  </ul>
+</body>
+</html>

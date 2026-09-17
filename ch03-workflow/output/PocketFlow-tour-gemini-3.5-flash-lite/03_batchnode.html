@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BatchNode — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 3: BatchNode</h1>
+<p>Imagine you run an automated fulfillment center where a box containing a dozen identical parts arrives at your station. If you had to unpack the box, write a manual loop to inspect each individual widget, handle errors for each one, and repack them all by hand every single time, your workflow would quickly become bogged down in repetitive boilerplate code.</p>
+<p>As we saw in <a href="01_basenode.html">BaseNode</a> and <a href="02_node.html">Node</a>, standard nodes are designed to handle a single task operation at a time. But what happens when your LLM application needs to translate a list of strings, analyze a batch of customer reviews, or process an array of independent database entries? Writing manual <code>for</code> loops inside your execution logic creates messy, repetitive code.</p>
+<p>That is where <code>BatchNode</code> comes in. It acts like a conveyor belt that automatically iterates over a collection of items, executing the core operation for each one individually.</p>
+<hr />
+<h3>The Conveyor Belt for Collections</h3>
+<p><code>BatchNode</code> inherits directly from <a href="02_node.html">Node</a>, meaning it keeps all the built-in retry safety nets you learned about previously. However, it overrides how execution handles data: instead of passing a single value into your <code>exec</code> method, it automatically loops through an iterable collection of items, running your logic on every single element.</p>
+<p>Here is how simple it looks to define a batch processing step:</p>
+<pre><code class="language-python">from pocketflow import BatchNode
+
+class TranslateText(BatchNode):
+    def prep(self, shared):
+        return shared.get(&quot;sentences&quot;, [])
+</code></pre>
+<p>Next, the node handles the heavy lifting for each individual piece:</p>
+<pre><code class="language-python">    def exec(self, item):
+        return item.upper()
+</code></pre>
+<p>Finally, the post-processing phase collects the results and saves them back to your shared state:</p>
+<pre><code class="language-python">    def post(self, shared, prep_res, exec_res):
+        shared[&quot;translated&quot;] = exec_res
+        return &quot;default&quot;
+</code></pre>
+<hr />
+<h3>How Batch Iteration Works</h3>
+<p>To visualize how items flow through a <code>BatchNode</code>, let's look at the sequence of operations:</p>
+<pre class="mermaid">sequenceDiagram
+    participant S as Shared Store
+    participant B as BatchNode
+    
+    S->>B: Provide list of items
+    B->>B: Iterate through each item individually
+    B->>B: Apply execution logic per item with retries
+    B->>S: Update state with list of results
+</pre>
+<p>Behind the scenes, <code>BatchNode</code> takes the collection returned by your <code>prep</code> method, feeds each element into the underlying execution and retry pipeline, and automatically bundles the outputs into a neat list for your <code>post</code> method.</p>
+<hr />
+<h3>Looking Ahead</h3>
+<p>Now that you know how to effortlessly process collections of items one by one using <code>BatchNode</code>, you might wonder: how do we chain multiple steps together into an automated pipeline or workflow?</p>
+<p>That brings us to the next chapter, where we look at <a href="04_flow.html">Flow</a> and how to orchestrate nodes into a complete, end-to-end application.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="02_node.html">&larr; Node</a></span>
+    <span><a href="04_flow.html">Flow &rarr;</a></span>
+  </nav>
+</body>
+</html>

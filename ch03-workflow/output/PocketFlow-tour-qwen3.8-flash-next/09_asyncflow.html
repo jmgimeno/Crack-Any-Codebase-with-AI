@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AsyncFlow — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 9: AsyncFlow</h1>
+<p>Imagine two agents playing a word game.</p>
+<p>One agent has the secret word and must wait for a guess.<br />
+The other agent must wait for a hint before guessing.</p>
+<p>If you ask one agent to finish before starting the other, nothing happens.</p>
+<p>The first agent waits forever for a message that will never arrive because the second agent has not started yet.</p>
+<p>What you need is a dispatcher.</p>
+<p>A dispatcher says:</p>
+<blockquote>
+<p>“You may wait for mail, but do not block everyone else.”</p>
+</blockquote>
+<p>In <a href="08_asyncnode.html">AsyncNode</a>, you built one polite station that can pause with <code>await</code>. Now you need something that can walk a whole graph of stations, including stations that sometimes need to wait.</p>
+<p>That is what <strong>AsyncFlow</strong> does.</p>
+<h2>A flow that knows when to wait</h2>
+<p>An <code>AsyncFlow</code> is like the tour guide from <a href="04_flow.html">Flow</a>, but it understands asynchronous nodes.</p>
+<p>Instead of running with:</p>
+<pre><code class="language-python">flow.run(shared)
+</code></pre>
+<p>you run it with:</p>
+<pre><code class="language-python">from pocketflow import AsyncFlow
+
+flow = AsyncFlow(start=hinter)
+await flow.run_async(shared)
+</code></pre>
+<p>That <code>await</code> is the important part.</p>
+<p>The flow is not saying:</p>
+<blockquote>
+<p>“Freeze the whole program while this step runs.”</p>
+</blockquote>
+<p>It is saying:</p>
+<blockquote>
+<p>“Run this node, and if it pauses to wait for something, let other waiting work continue.”</p>
+</blockquote>
+<h2>The dispatcher rule</h2>
+<p>Inside an ordinary <a href="04_flow.html">Flow</a>, every node is run with the synchronous path.</p>
+<p>An <code>AsyncFlow</code> looks at the current runner and chooses a platform.</p>
+<p>Simplified, the idea looks like this:</p>
+<pre><code class="language-python">if isinstance(curr, AsyncNode):
+    action = await curr._run_async(shared)
+else:
+    action = curr._run(shared)
+</code></pre>
+<p>That is the whole dispatcher trick.</p>
+<p>If the current node is an <a href="08_asyncnode.html">AsyncNode</a>, the flow awaits it.</p>
+<p>If the current node is a normal <a href="02_node.html">Node</a>, the flow runs it normally.</p>
+<p>This means one graph can mix both kinds of workers:</p>
+<pre><code class="language-python">load &gt;&gt; summarize &gt;&gt; save
+flow = AsyncFlow(start=load)
+await flow.run_async(shared)
+</code></pre>
+<p>Here, <code>load</code> and <code>save</code> might be ordinary synchronous nodes.<br />
+<code>summarize</code> might be an async node waiting on an LLM.</p>
+<p>The dispatcher handles both.</p>
+<p>One warning: if a synchronous node blocks the thread, it can still block your async flow. AsyncFlow gives you a polite structure, but it cannot magically make blocking code non-blocking.</p>
+<h2>Mixing sync and async workers</h2>
+<p>Suppose you have a simple pipeline:</p>
+<ol>
+<li>Load a file synchronously.</li>
+<li>Ask an LLM asynchronously.</li>
+<li>Save the result synchronously.</li>
+</ol>
+<p>The graph might look like this:</p>
+<pre><code class="language-python">load &gt;&gt; summarize &gt;&gt; save
+flow = AsyncFlow(start=load)
+await flow.run_async(shared)
+</code></pre>
+<p>The sync nodes are fast helpers.<br />
+The async node is the one that may need to pause.</p>
+<p>That is often a good shape for real systems:</p>
+<ul>
+<li>quick file reads and writes stay simple</li>
+<li>slow model calls become async</li>
+<li>routing still uses <a href="03_successors.html">successors</a> as usual</li>
+</ul>
+<p>If you put an <a href="08_asyncnode.html">AsyncNode</a> inside a plain synchronous <a href="04_flow.html">Flow</a>, it will not work. The plain flow tries the synchronous run path, and the async node refuses:</p>
+<pre><code class="language-python">RuntimeError: Use run_async.
+</code></pre>
+<p>So choose your tour guide carefully:</p>
+<ul>
+<li>use <a href="04_flow.html">Flow</a> when everything is synchronous</li>
+<li>use <code>AsyncFlow</code> when any part of the graph needs to await</li>
+</ul>
+<h2>Shared state can become a mailbox</h2>
+<p>In <a href="01_shared.html">shared</a>, you learned that the run whiteboard can hold more than strings and lists. It can also hold coordination objects like queues.</p>
+<p>A queue is like a mailbox with two sides:</p>
+<ul>
+<li>one side puts messages in</li>
+<li>the other side waits for messages to arrive</li>
+</ul>
+<p>For async agents, this is perfect.</p>
+<p>One agent can send a message into a queue.<br />
+Another async node can wait on that queue without freezing the whole program.</p>
+<p>Here is the setup from the multi-agent example:</p>
+<pre><code class="language-python">shared = {
+    &quot;target_word&quot;: &quot;nostalgic&quot;,
+    &quot;forbidden_words&quot;: [&quot;memory&quot;],
+    &quot;hinter_queue&quot;: asyncio.Queue(),
+    &quot;guesser_queue&quot;: asyncio.Queue()
+}
+await shared[&quot;hinter_queue&quot;].put(&quot;&quot;)
+</code></pre>
+<p>The whiteboard now carries:</p>
+<ul>
+<li>the game data</li>
+<li>one queue for guesses</li>
+<li>one queue for hints</li>
+</ul>
+<p>Those queues are not just data. They are meeting points.</p>
+<h2>How two flows cooperate</h2>
+<p>Imagine two agents:</p>
+<ul>
+<li>a hinter that waits for a guess and sends a hint</li>
+<li>a guesser that waits for a hint and sends a guess</li>
+</ul>
+<p>The hinter starts by waiting for mail:</p>
+<pre><code class="language-python">class Hinter(AsyncNode):
+    async def prep_async(self, shared):
+        guess = await shared[&quot;hinter_queue&quot;].get()
+        return shared[&quot;target_word&quot;], shared[&quot;forbidden_words&quot;]
+</code></pre>
+<p>That line is the heart of coordination:</p>
+<pre><code class="language-python">guess = await shared[&quot;hinter_queue&quot;].get()
+</code></pre>
+<p>If there is no message yet, this node waits.</p>
+<p>Because it waits with <code>await</code>, other work can continue.</p>
+<p>After making a hint, the hinter sends it back through the other queue:</p>
+<pre><code class="language-python">    async def post_async(self, shared, prep_res, exec_res):
+        await shared[&quot;guesser_queue&quot;].put(exec_res)
+        return &quot;continue&quot;
+</code></pre>
+<p>The guesser does the mirror image: wait for a hint, make a guess, send it back.</p>
+<p>Now create one flow for each agent:</p>
+<pre><code class="language-python">hinter_flow = AsyncFlow(start=hinter)
+guesser_flow = AsyncFlow(start=guesser)
+hinter - &quot;continue&quot; &gt;&gt; hinter
+guesser - &quot;continue&quot; &gt;&gt; guesser
+await asyncio.gather(
+    hinter_flow.run_async(shared),
+    guesser_flow.run_async(shared)
+)
+</code></pre>
+<p>Read this slowly.</p>
+<p>First, each agent gets its own flow:</p>
+<pre><code class="language-python">hinter_flow = AsyncFlow(start=hinter)
+guesser_flow = AsyncFlow(start=guesser)
+</code></pre>
+<p>Then each node loops back to itself using <a href="03_successors.html">successors</a>:</p>
+<pre><code class="language-python">hinter - &quot;continue&quot; &gt;&gt; hinter
+guesser - &quot;continue&quot; &gt;&gt; guesser
+</code></pre>
+<p>Finally, both flows start together:</p>
+<pre><code class="language-python">await asyncio.gather(
+    hinter_flow.run_async(shared),
+    guesser_flow.run_async(shared)
+)
+</code></pre>
+<p><code>asyncio.gather</code> is like a dispatcher starting two tours at the same time.</p>
+<p>Both tours share the same <a href="01_shared.html">shared</a> whiteboard. They coordinate through queues instead of global variables.</p>
+<h2>What happens while one agent waits?</h2>
+<p>This is where async coordination becomes easy to picture.</p>
+<pre class="mermaid">sequenceDiagram
+participant C as Caller
+participant F as Flow
+participant N as Node
+participant Q as Queue
+participant S as Shared
+C->>F: Start async flow with shared board
+F->>N: Run current node asynchronously
+N->>Q: Wait for message from another agent
+Q-->>N: Return message when ready
+N->>S: Write result and choose next step
+</pre>
+<p>When the hinter waits on its queue, it is not blocking the guesser.</p>
+<p>The event loop can let the guesser run.<br />
+Then the guesser may wait on its own queue.<br />
+Then the hinter wakes up when a message arrives.</p>
+<p>That back-and-forth is what lets two agents play together.</p>
+<h2>Why running one flow at a time deadlocks</h2>
+<p>This code looks reasonable:</p>
+<pre><code class="language-python">await hinter_flow.run_async(shared)
+await guesser_flow.run_async(shared)
+</code></pre>
+<p>But it can deadlock.</p>
+<p>The first line starts the hinter flow. The hinter waits for a guess.</p>
+<p>That guess will come from the guesser.</p>
+<p>But the guesser has not started yet because the second <code>await</code> is waiting behind the first one.</p>
+<p>That is why the example uses:</p>
+<pre><code class="language-python">await asyncio.gather(...)
+</code></pre>
+<p>It starts both flows so they can take turns through queues.</p>
+<h2>AsyncFlow can also be a node</h2>
+<p>You already know from <a href="04_flow.html">Flow</a> that a flow can behave like a node inside another flow.</p>
+<p><code>AsyncFlow</code> keeps that idea, but in the async world.</p>
+<p>A nested <code>AsyncFlow</code> can sit inside another <code>AsyncFlow</code>:</p>
+<pre><code class="language-python">outer = AsyncFlow(start=review_flow)
+review_flow - &quot;done&quot; &gt;&gt; report
+await outer.run_async(shared)
+</code></pre>
+<p>From the outside, <code>review_flow</code> is one stop on a bigger tour.</p>
+<p>Inside, it may run many async nodes.</p>
+<p>Because <code>AsyncFlow</code> also behaves like an <a href="08_asyncnode.html">AsyncNode</a>, a parent async flow can await it politely.</p>
+<p>You can even override its final routing:</p>
+<pre><code class="language-python">class GameFlow(AsyncFlow):
+    async def post_async(self, shared, prep_res, exec_res):
+        if shared.get(&quot;winner&quot;):
+            return &quot;report&quot;
+        return exec_res
+</code></pre>
+<p>Now the outer flow sees one simple handoff word: <code>&quot;report&quot;</code> or whatever the inner flow returns.</p>
+<p>That is the same composition idea from <a href="04_flow.html">Flow</a>, just with waiting allowed inside.</p>
+<h2>Async batch flows are dispatchers too</h2>
+<p>In <a href="07_batchflow.html">BatchFlow</a>, you saw how to run a whole subflow once for each set of <a href="05_params.html">params</a>.</p>
+<p>AsyncFlow gives async versions of that idea.</p>
+<p>A sequential async batch flow can prepare instruction cards asynchronously:</p>
+<pre><code class="language-python">class AsyncImageBatchFlow(AsyncBatchFlow):
+    async def prep_async(self, shared):
+        return [{&quot;image_path&quot;: path} for path in shared[&quot;images&quot;]]
+</code></pre>
+<p>It runs each pass one after another, but each pass may contain async nodes.</p>
+<p>A parallel batch flow goes further:</p>
+<pre><code class="language-python">class AsyncImageParallelBatchFlow(AsyncParallelBatchFlow):
+    async def prep_async(self, shared):
+        return [{&quot;image_path&quot;: path} for path in shared[&quot;images&quot;]]
+</code></pre>
+<p>The parallel version starts many passes together and lets them overlap while they wait.</p>
+<p>This is useful when each pass does something like:</p>
+<ul>
+<li>call an LLM</li>
+<li>fetch a file</li>
+<li>ask another service</li>
+<li>wait on a queue</li>
+</ul>
+<p>If the work mostly waits, several passes can make progress at once.</p>
+<h2>A few gotchas</h2>
+<h3>1. Do not use plain Flow for async nodes</h3>
+<p>A synchronous <a href="04_flow.html">Flow</a> calls the normal run path.</p>
+<p>An <a href="08_asyncnode.html">AsyncNode</a> expects the async run path.</p>
+<p>If you mix them incorrectly, Pocket Flow will tell you to use <code>run_async</code>.</p>
+<p>Use <code>AsyncFlow</code> when the graph contains async nodes or nested async flows.</p>
+<h3>2. Blocking code still blocks</h3>
+<p>This warning from <a href="08_asyncnode.html">AsyncNode</a> becomes even more important in a flow.</p>
+<p>A sync node inside an async flow can block the event loop.</p>
+<p>Likewise, this looks async but is not:</p>
+<pre><code class="language-python">async def exec_async(self, inputs):
+    return call_llm(prompt)
+</code></pre>
+<p>If <code>call_llm</code> blocks, your dispatcher pauses for everyone.</p>
+<p>A safer pattern is:</p>
+<pre><code class="language-python">async def exec_async(self, inputs):
+    return await asyncio.to_thread(call_llm, prompt)
+</code></pre>
+<p>Think of it as sending the slow errand to another worker while keeping the main dispatch desk open.</p>
+<h3>3. Shared queues can cross-talk between runs</h3>
+<p>Queues on <a href="01_shared.html">shared</a> are great for intentional coordination.</p>
+<p>But if two independent runs accidentally share the same queue, they may start talking to each other.</p>
+<p>For separate requests, create fresh boards and fresh queues:</p>
+<pre><code class="language-python">run_1 = {&quot;queue&quot;: asyncio.Queue()}
+run_2 = {&quot;queue&quot;: asyncio.Queue()}
+</code></pre>
+<p>For a multi-agent game, sharing queues is exactly what you want.</p>
+<h3>4. Directly running an AsyncFlow with outer successors may warn</h3>
+<p>If an <code>AsyncFlow</code> object itself has outside <a href="03_successors.html">successors</a>, calling its own <code>run_async</code> directly behaves like running a single node: it runs the flow’s inner graph but does not walk the outer doors.</p>
+<p>To use it as part of a larger async graph, put it inside another <code>AsyncFlow</code> and run the parent.</p>
+<p>That keeps the same rule from <a href="02_node.html">Node</a> and <a href="08_asyncnode.html">AsyncNode</a>: one runner is for one station or one inner tour; a parent flow walks the bigger corridor.</p>
+<h2>The mental model to keep</h2>
+<p>When you see <code>AsyncFlow</code>, think:</p>
+<blockquote>
+<p>“This is a dispatcher for workers who sometimes need to wait.”</p>
+</blockquote>
+<p>It can run:</p>
+<ul>
+<li>normal <a href="02_node.html">Node</a> stations</li>
+<li>async <a href="08_asyncnode.html">AsyncNode</a> stations</li>
+<li>nested flows as sub-tours</li>
+<li>batch passes when combined with async batch classes</li>
+</ul>
+<p>Most importantly, it lets multiple flows cooperate through the same <a href="01_shared.html">shared</a> whiteboard.</p>
+<p>Queues become mailboxes.<br />
+Flows become independent tours.<br />
+The event loop becomes the dispatcher that lets them take turns.</p>
+<p>That is how you build agent systems where one part can wait for another without freezing the whole program.</p>
+<p>Now you have the final core concept: a flow that can pause, branch, and coordinate multiple cooperating workers. The next step is not another idea—it is your own multi-agent app: start with two <a href="08_asyncnode.html">AsyncNode</a> workers, two queues on the <a href="01_shared.html">shared</a> board, and one <code>AsyncFlow</code> for each worker.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="08_asyncnode.html">&larr; AsyncNode</a></span>
+    <span>&nbsp;</span>
+  </nav>
+</body>
+</html>

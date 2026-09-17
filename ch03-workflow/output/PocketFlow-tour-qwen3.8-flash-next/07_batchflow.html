@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BatchFlow — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 7: BatchFlow</h1>
+<p>Imagine you built a tiny image workshop.</p>
+<p>It has three stations:</p>
+<ol>
+<li>Load an image.</li>
+<li>Apply a filter.</li>
+<li>Save the result.</li>
+</ol>
+<p>For one job, it works beautifully:</p>
+<blockquote>
+<p>Process <code>cat.jpg</code> with <code>blur</code>.</p>
+</blockquote>
+<p>Then your boss walks in and says:</p>
+<blockquote>
+<p>Great. Now process <code>cat.jpg</code>, <code>dog.jpg</code>, and <code>bird.jpg</code> with <code>grayscale</code>, <code>blur</code>, and <code>sepia</code>.</p>
+</blockquote>
+<p>Do you build nine separate flows?</p>
+<p>Do you make <code>BlurCatFlow</code>, <code>SepiaDogFlow</code>, and so on?</p>
+<p>No.</p>
+<p>You want the same little workshop to run again and again, but each time it receives a different instruction card.</p>
+<p>That is what <strong>BatchFlow</strong> gives you.</p>
+<h2>One workshop, many registration cards</h2>
+<p>Think of a <a href="04_flow.html">Flow</a> as a guided tour through several stations.</p>
+<p>A BatchFlow is like a scheduler for that tour.</p>
+<p>It says:</p>
+<blockquote>
+<p>Run this same tour once for each set of instructions.</p>
+</blockquote>
+<p>In the image example, one pass might receive:</p>
+<pre><code class="language-python">{&quot;input&quot;: &quot;cat.jpg&quot;, &quot;filter&quot;: &quot;blur&quot;}
+</code></pre>
+<p>The next pass receives:</p>
+<pre><code class="language-python">{&quot;input&quot;: &quot;dog.jpg&quot;, &quot;filter&quot;: &quot;sepia&quot;}
+</code></pre>
+<p>Those dictionaries are not random data. They are <a href="05_params.html">params</a> — instruction cards attached to one nested run.</p>
+<p>A BatchFlow’s <code>prep</code> method returns a list of those instruction cards.</p>
+<pre><code class="language-python">class ImageBatchFlow(BatchFlow):
+    def prep(self, shared):
+        return [
+            {&quot;input&quot;: &quot;cat.jpg&quot;, &quot;filter&quot;: &quot;blur&quot;},
+            {&quot;input&quot;: &quot;dog.jpg&quot;, &quot;filter&quot;: &quot;sepia&quot;}
+        ]
+</code></pre>
+<p>Each dictionary tells one pass of the base flow what to do.</p>
+<p>This is different from <a href="06_batchnode.html">BatchNode</a>.</p>
+<p>A BatchNode repeats one station over a tray of items.</p>
+<p>A BatchFlow repeats an entire little tour, once for each instruction card.</p>
+<h2>Wrap the little flow once</h2>
+<p>First, build the normal single-image flow.</p>
+<pre><code class="language-python">base_flow = Flow(start=load)
+</code></pre>
+<p>Now wrap it inside a BatchFlow.</p>
+<pre><code class="language-python">batch_flow = ImageBatchFlow(start=base_flow)
+</code></pre>
+<p>This works because a <a href="04_flow.html">Flow</a> can behave like a node.</p>
+<p>From the outside, <code>batch_flow</code> is one stop in a bigger graph.</p>
+<p>From the inside, it runs the whole base flow again and again.</p>
+<p>Run it like any other flow:</p>
+<pre><code class="language-python">shared = {}
+batch_flow.run(shared)
+</code></pre>
+<p>The same <a href="01_shared.html">shared</a> whiteboard travels through every pass.</p>
+<p>Each pass gets its own instruction card.</p>
+<h2>What BatchFlow actually does</h2>
+<p>Under the hood, <code>BatchFlow</code> is surprisingly small.</p>
+<p>It inherits from <code>Flow</code>, but changes how a run happens.</p>
+<pre><code class="language-python">class BatchFlow(Flow):
+    def _run(self, shared):
+        pr = self.prep(shared) or []
+        for bp in pr:
+            self._orch(shared, {**self.params, **bp})
+        return self.post(shared, pr, None)
+</code></pre>
+<p>Let’s read it slowly.</p>
+<h3>Step 1: Prepare instruction cards</h3>
+<pre><code class="language-python">pr = self.prep(shared) or []
+</code></pre>
+<p><code>prep</code> can read the <a href="01_shared.html">shared</a> board and build a list of parameter dictionaries.</p>
+<p>If <code>prep</code> returns nothing, the batch becomes an empty list instead of crashing.</p>
+<h3>Step 2: Run the base flow once per card</h3>
+<pre><code class="language-python">for bp in pr:
+    self._orch(shared, {**self.params, **bp})
+</code></pre>
+<p>For each instruction card, it runs <code>_orch</code>.</p>
+<p>That is the same orchestration loop you met in <a href="04_flow.html">Flow</a>: copy the current runner, attach params, run it, follow its successors.</p>
+<p>The important part is this merge:</p>
+<pre><code class="language-python">{**self.params, **bp}
+</code></pre>
+<p>This combines:</p>
+<ul>
+<li>the outer BatchFlow’s default params</li>
+<li>the per-pass batch params</li>
+</ul>
+<p>As you learned in <a href="05_params.html">params</a>, the later dictionary wins.</p>
+<p>So a pass can override a default setting without changing the graph.</p>
+<h3>Step 3: Finish with post</h3>
+<pre><code class="language-python">return self.post(shared, pr, None)
+</code></pre>
+<p><code>post</code> receives:</p>
+<ul>
+<li><code>shared</code>: the run whiteboard</li>
+<li><code>pr</code>: the list of instruction cards that were prepared</li>
+<li><code>None</code>: because BatchFlow does not automatically collect one big result from all passes</li>
+</ul>
+<p>That last point matters.</p>
+<p>Unlike <a href="06_batchnode.html">BatchNode</a>, a standard BatchFlow does <strong>not</strong> give you an <code>exec_res_list</code>.</p>
+<p>It just runs each pass.</p>
+<p>If you want to keep results, write them into <a href="01_shared.html">shared</a> or override <code>post</code>.</p>
+<pre class="mermaid">sequenceDiagram
+participant C as Caller
+participant B as BatchFlow
+participant P as Params
+participant F as BaseFlow
+participant S as Shared
+C->>B: Run batch flow with shared board
+B->>B: Prepare list of instruction cards
+loop For each instruction card
+B->>P: Merge outer and item settings
+B->>F: Run base flow once
+F->>S: Read and write run state
+end
+B-->>C: Return final routing signal
+</pre>
+<h2>The inner nodes stay simple</h2>
+<p>The best part of BatchFlow is that the normal <a href="02_node.html">Node</a> objects do not need to know they are inside a batch.</p>
+<p>This loading node only reads its instruction card:</p>
+<pre><code class="language-python">class LoadImage(Node):
+    def prep(self, shared):
+        return self.params[&quot;input&quot;]
+</code></pre>
+<p>It does not ask:</p>
+<ul>
+<li>Is this the first image?</li>
+<li>Is there a list somewhere?</li>
+<li>Am I inside a BatchFlow?</li>
+</ul>
+<p>It just reads <code>self.params[&quot;input&quot;]</code>.</p>
+<p>Another node may read another field:</p>
+<pre><code class="language-python">filter_type = self.params.get(&quot;filter&quot;, &quot;blur&quot;)
+</code></pre>
+<p>That is the whole magic.</p>
+<p>The batch scheduler changes the instruction card.</p>
+<p>The stations keep doing their normal job.</p>
+<h2>Shared state travels across passes</h2>
+<p>This is one of the most important things to understand.</p>
+<p>A BatchFlow gives each pass its own params, but it does <strong>not</strong> automatically give each pass its own <a href="01_shared.html">shared</a> board.</p>
+<p>The same whiteboard is reused for every pass.</p>
+<p>In the image example, that is fine because each pass overwrites the relevant keys:</p>
+<pre><code class="language-python">shared[&quot;image&quot;] = loaded_image
+shared[&quot;filtered_image&quot;] = filtered_image
+</code></pre>
+<p>The next pass replaces those notes with its own.</p>
+<p>But if you want to collect results from many passes, you need to be careful.</p>
+<p>Imagine a base flow that calculates one student’s grade average.</p>
+<p>Inside that flow, a node might write:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    class_name = self.params[&quot;class&quot;]
+    student = self.params[&quot;student&quot;]
+    grades = shared.setdefault(&quot;grades&quot;, {})
+    grades.setdefault(class_name, {})[student] = exec_res
+</code></pre>
+<p>Now each pass writes into a separate slot:</p>
+<pre><code class="language-python">shared[&quot;grades&quot;][&quot;class_a&quot;][&quot;alice.txt&quot;] = 92.5
+</code></pre>
+<p>That keeps the whiteboard organized instead of scribbling over itself.</p>
+<p>A good rule:</p>
+<blockquote>
+<p>Params can change per pass. Shared state does not automatically reset per pass.</p>
+</blockquote>
+<h2>Nested batch flows are schedules inside schedules</h2>
+<p>BatchFlow becomes especially powerful when you nest it.</p>
+<p>Imagine a school.</p>
+<p>You want to calculate:</p>
+<ol>
+<li>Each student’s average.</li>
+<li>Each class’s average.</li>
+<li>The whole school’s average.</li>
+</ol>
+<p>Start with one base flow that processes one student.</p>
+<p>Then wrap it in a <code>ClassBatchFlow</code>.</p>
+<pre><code class="language-python">class ClassBatchFlow(BatchFlow):
+    def prep(self, shared):
+        roster = shared[&quot;rosters&quot;][self.params[&quot;class&quot;]]
+        return [{&quot;student&quot;: name} for name in roster]
+</code></pre>
+<p>This BatchFlow reads the class name from its own params.</p>
+<p>Then it creates one instruction card per student.</p>
+<p>Now wrap that inside a <code>SchoolBatchFlow</code>.</p>
+<pre><code class="language-python">class SchoolBatchFlow(BatchFlow):
+    def prep(self, shared):
+        return [{&quot;class&quot;: folder} for folder in shared[&quot;classes&quot;]]
+</code></pre>
+<p>Connect them:</p>
+<pre><code class="language-python">class_flow = ClassBatchFlow(start=base_flow)
+school_flow = SchoolBatchFlow(start=class_flow)
+</code></pre>
+<p>Now the school flow runs once per class.</p>
+<p>Each class pass sets a new instruction card:</p>
+<pre><code class="language-python">{&quot;class&quot;: &quot;class_a&quot;}
+</code></pre>
+<p>Then the class flow reads that card and creates student cards:</p>
+<pre><code class="language-python">{&quot;student&quot;: &quot;alice.txt&quot;}
+</code></pre>
+<p>Because of the merge inside BatchFlow, the inner nodes can receive both:</p>
+<pre><code class="language-python">self.params[&quot;class&quot;]
+self.params[&quot;student&quot;]
+</code></pre>
+<p>That is like a school scheduler saying:</p>
+<blockquote>
+<p>Today we run the workshop for class A.<br />
+Inside that workshop, schedule it again for each student in class A.</p>
+</blockquote>
+<h2>BatchFlow and routing</h2>
+<p>A BatchFlow is still node-like.</p>
+<p>So you can connect it to other nodes using <a href="03_successors.html">successors</a>.</p>
+<p>For example:</p>
+<pre><code class="language-python">batch_flow &gt;&gt; report_node
+</code></pre>
+<p>By default, <code>BatchFlow</code> passes <code>None</code> as the final result into <code>post</code>, and the inherited <code>Flow.post</code> returns that value.</p>
+<p>So if you do not override <code>post</code>, the outer flow usually treats the BatchFlow as returning the default path.</p>
+<p>You can override <code>post</code> to inspect the run and choose a routing word:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    shared[&quot;passes_run&quot;] = len(prep_res)
+    return &quot;report&quot;
+</code></pre>
+<p>Then connect the door:</p>
+<pre><code class="language-python">batch_flow - &quot;report&quot; &gt;&gt; report_node
+</code></pre>
+<p>The base flow’s internal routing still works normally.</p>
+<p>Each pass can branch or loop according to its own <a href="03_successors.html">successors</a>.</p>
+<p>But from the outer graph’s point of view, the whole batch is just one stop.</p>
+<h2>A few gotchas</h2>
+<h3>1. Return dictionaries, not raw items</h3>
+<p>A BatchFlow expects each entry in <code>prep</code>’s result to be a dictionary-like params card.</p>
+<p>Good:</p>
+<pre><code class="language-python">return [{&quot;input&quot;: &quot;cat.jpg&quot;}]
+</code></pre>
+<p>Bad:</p>
+<pre><code class="language-python">return [&quot;cat.jpg&quot;]
+</code></pre>
+<p>The second one tries to merge a string into params, which will not work.</p>
+<h3>2. Shared state is not isolated by default</h3>
+<p>If two passes both write:</p>
+<pre><code class="language-python">shared[&quot;result&quot;] = value
+</code></pre>
+<p>the second pass overwrites the first.</p>
+<p>Use namespaced keys when collecting batch results:</p>
+<pre><code class="language-python">shared.setdefault(&quot;results&quot;, {})[self.params[&quot;input&quot;]] = value
+</code></pre>
+<p>Or clear temporary keys at the start of each pass if that makes sense for your flow.</p>
+<h3>3. BatchFlow does not collect outputs automatically</h3>
+<p>In <a href="06_batchnode.html">BatchNode</a>, <code>post</code> receives a list of results.</p>
+<p>In BatchFlow, it does not.</p>
+<p>If you need a report, build it inside the nodes or in <code>post</code>.</p>
+<p>For example:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    shared[&quot;passed&quot;] = len(shared.get(&quot;results&quot;, {}))
+</code></pre>
+<h3>4. Standard BatchFlow is sequential</h3>
+<p>It runs one pass after another.</p>
+<p>That keeps the model simple and predictable.</p>
+<p>If you need asynchronous parallel passes, you will meet that idea in <a href="08_asyncnode.html">AsyncNode</a> and later async flow patterns.</p>
+<h2>Good habits for BatchFlow</h2>
+<h3>Keep instruction cards small</h3>
+<p>A param card should usually say which job to run, not carry a giant pile of mutable working data.</p>
+<p>Good:</p>
+<pre><code class="language-python">{&quot;student&quot;: &quot;alice.txt&quot;}
+</code></pre>
+<p>Then the node can look up the real data from <a href="01_shared.html">shared</a>:</p>
+<pre><code class="language-python">content = shared[&quot;students&quot;][self.params[&quot;student&quot;]]
+</code></pre>
+<p>This keeps params closer to configuration and shared closer to run state.</p>
+<h3>Use clear key names</h3>
+<p>Just like with <a href="01_shared.html">shared</a>, params become confusing when keys are vague.</p>
+<p>Good:</p>
+<pre><code class="language-python">{&quot;input&quot;: &quot;cat.jpg&quot;, &quot;filter&quot;: &quot;blur&quot;}
+</code></pre>
+<p>Bad:</p>
+<pre><code class="language-python">{&quot;x&quot;: &quot;cat.jpg&quot;, &quot;cfg2&quot;: &quot;blur&quot;}
+</code></pre>
+<p>Instruction cards should be readable at a glance.</p>
+<h3>Let per-pass cards override defaults</h3>
+<p>If you want a default language, set it on the outer flow:</p>
+<pre><code class="language-python">batch_flow.set_params({&quot;language&quot;: &quot;en&quot;})
+</code></pre>
+<p>Then one pass can override it:</p>
+<pre><code class="language-python">{&quot;text_key&quot;: &quot;intro&quot;, &quot;language&quot;: &quot;fr&quot;}
+</code></pre>
+<p>Because of <code>{**self.params, **bp}</code>, the per-pass value wins.</p>
+<h3>Do not rely on inner flow defaults being merged automatically</h3>
+<p>A BatchFlow merges its own params with each batch card.</p>
+<p>That merged dictionary becomes the params badge for the nested run.</p>
+<p>If you have defaults inside the base flow itself, be careful: a BatchFlow pass may replace those settings rather than blending them in.</p>
+<p>When in doubt, put shared defaults on the BatchFlow or include them in each prep dictionary.</p>
+<h2>The mental model to keep</h2>
+<p>When you see BatchFlow, think:</p>
+<blockquote>
+<p>This is a scheduler for a little workshop.</p>
+</blockquote>
+<p>It does not stamp one badge at a time like <a href="06_batchnode.html">BatchNode</a>.</p>
+<p>Instead, it says:</p>
+<blockquote>
+<p>Run this whole tour again for each registration card.</p>
+</blockquote>
+<p>Each card becomes params for that nested run.</p>
+<p>The same <a href="01_shared.html">shared</a> whiteboard stays in the room.</p>
+<p>The instruction cards change from pass to pass.</p>
+<p>That gives you a clean way to reuse one flow many times without creating a pile of nearly identical classes.</p>
+<p>Now you know how to schedule the same little flow for many parameter sets.</p>
+<p>But standard BatchFlow runs those passes one after another, like a workshop that waits for each student to finish before calling the next one.</p>
+<p>What if some steps involve waiting — network calls, file reads, model responses — and you want several students to progress while others wait?</p>
+<p>That is where asynchronous nodes enter the story: <a href="08_asyncnode.html">AsyncNode</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="06_batchnode.html">&larr; BatchNode</a></span>
+    <span><a href="08_asyncnode.html">AsyncNode &rarr;</a></span>
+  </nav>
+</body>
+</html>

@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>successors — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 3: successors</h1>
+<p>Imagine your research assistant just searched the web.</p>
+<p>The search node finishes and returns one small thing:</p>
+<pre><code class="language-python">&quot;decide&quot;
+</code></pre>
+<p>That is all it says.</p>
+<p>So who tells the program to go back to the decision node?<br />
+Who says, “Okay, <code>&quot;search&quot;</code> means run the search node”?<br />
+And what happens when the assistant finally wants to answer instead?</p>
+<p>If you put that logic inside giant <code>if</code> statements, your flow quickly becomes a maze:</p>
+<pre><code class="language-python">if action == &quot;search&quot;:
+    ...
+elif action == &quot;answer&quot;:
+    ...
+elif action == &quot;retry&quot;:
+    ...
+</code></pre>
+<p>Pocket Flow uses a cleaner idea.</p>
+<p>Think of every node as a worker standing in a corridor with doors above it.</p>
+<p>Each door has a label:</p>
+<blockquote>
+<p><code>search</code><br />
+<code>answer</code><br />
+<code>default</code><br />
+<code>done</code></p>
+</blockquote>
+<p>When the worker finishes, they do not drag the whole program by hand to the next station.</p>
+<p>They simply say one word.</p>
+<p>The sign above the matching door decides where the flow goes next.</p>
+<p>That mapping from “word” to “next node” is called <strong>successors</strong>.</p>
+<h2>The routing table lives on the node</h2>
+<p>In <a href="02_node.html">Node</a>, you saw that a node’s <code>post</code> method can return a routing signal.</p>
+<p>Successors are how Pocket Flow turns that signal into an actual path.</p>
+<p>Every node starts with an empty successor table:</p>
+<pre><code class="language-python">class BaseNode:
+    def __init__(self):
+        self.params = {}
+        self.successors = {}
+</code></pre>
+<p>That <code>successors</code> dictionary is the routing table.</p>
+<p>It maps action strings to next nodes.</p>
+<p>A simple version looks like this:</p>
+<pre><code class="language-text">{
+  &quot;search&quot;: SearchWeb node,
+  &quot;answer&quot;: AnswerQuestion node
+}
+</code></pre>
+<p>The node does not need to know what those other nodes do.</p>
+<p>It only knows that if it returns <code>&quot;search&quot;</code>, there should be a door labeled <code>&quot;search&quot;</code>.</p>
+<h2>Connecting doors between nodes</h2>
+<p>In the research agent flow from the cookbook, three nodes are connected like this:</p>
+<pre><code class="language-python">decide = DecideAction()
+search = SearchWeb()
+answer = AnswerQuestion()
+
+decide - &quot;search&quot; &gt;&gt; search
+decide - &quot;answer&quot; &gt;&gt; answer
+search - &quot;decide&quot; &gt;&gt; decide
+</code></pre>
+<p>Then the flow starts at <code>decide</code>:</p>
+<pre><code class="language-python">return Flow(start=decide)
+</code></pre>
+<p>Let’s read those connections like signs above doors.</p>
+<p>The line:</p>
+<pre><code class="language-python">decide - &quot;search&quot; &gt;&gt; search
+</code></pre>
+<p>means:</p>
+<blockquote>
+<p>If the decision node returns <code>&quot;search&quot;</code>, go to the search node.</p>
+</blockquote>
+<p>The line:</p>
+<pre><code class="language-python">decide - &quot;answer&quot; &gt;&gt; answer
+</code></pre>
+<p>means:</p>
+<blockquote>
+<p>If the decision node returns <code>&quot;answer&quot;</code>, go to the answer node.</p>
+</blockquote>
+<p>And this line:</p>
+<pre><code class="language-python">search - &quot;decide&quot; &gt;&gt; decide
+</code></pre>
+<p>means:</p>
+<blockquote>
+<p>After searching, if the search node returns <code>&quot;decide&quot;</code>, loop back to the decision node.</p>
+</blockquote>
+<p>That last connection is what lets the agent keep researching until it has enough information.</p>
+<h2>What that funny dash and arrow mean</h2>
+<p>Pocket Flow uses a small bit of Python operator magic.</p>
+<p>When you write:</p>
+<pre><code class="language-python">decide - &quot;search&quot;
+</code></pre>
+<p>Python calls <code>__sub__</code>, which creates a little “conditional transition” object:</p>
+<pre><code class="language-python">def __sub__(self, action):
+    if isinstance(action, str):
+        return _ConditionalTransition(self, action)
+</code></pre>
+<p>That object remembers two things:</p>
+<ul>
+<li>the source node</li>
+<li>the action string</li>
+</ul>
+<p>Then when you write:</p>
+<pre><code class="language-python">decide - &quot;search&quot; &gt;&gt; search
+</code></pre>
+<p>the <code>&gt;&gt;</code> attaches the target node.</p>
+<p>Internally, it does something like this:</p>
+<pre><code class="language-python">class _ConditionalTransition:
+    def __rshift__(self, tgt):
+        return self.src.next(tgt, self.action)
+</code></pre>
+<p>The real work happens in <code>next</code>:</p>
+<pre><code class="language-python">def next(self, node, action=&quot;default&quot;):
+    if action in self.successors:
+        warnings.warn(&quot;Overwriting successor&quot;)
+    self.successors[action] = node
+    return node
+</code></pre>
+<p>So the connection syntax is just a friendly way to fill up the routing table.</p>
+<h2>The default door</h2>
+<p>Sometimes you do not want multiple doors.</p>
+<p>You just want one next step.</p>
+<p>That is what <code>default</code> is for.</p>
+<p>Instead of:</p>
+<pre><code class="language-python">node - &quot;default&quot; &gt;&gt; next_node
+</code></pre>
+<p>you can write:</p>
+<pre><code class="language-python">node &gt;&gt; next_node
+</code></pre>
+<p>This is common in linear flows:</p>
+<pre><code class="language-python">chunk_docs_node &gt;&gt; embed_docs_node &gt;&gt; create_index_node
+</code></pre>
+<p>That one line builds a chain.</p>
+<p>It works because <code>&gt;&gt;</code> returns the target node, so the next connection attaches to that target.</p>
+<p>You can also think of <code>default</code> as an invisible door.</p>
+<p>If a node’s <code>post</code> method does not return anything, Pocket Flow treats that as asking for the default door.</p>
+<p>This was hinted at in <a href="02_node.html">Node</a>.</p>
+<p>Now you know where that signal goes.</p>
+<h2>How Flow reads the successor table</h2>
+<p>A flow does not contain a big if/elif chain saying which node to run next.</p>
+<p>Instead, it asks the current node’s routing table:</p>
+<blockquote>
+<p>“The last action was this. What door matches?”</p>
+</blockquote>
+<p>A simplified version of Pocket Flow’s lookup looks like this:</p>
+<pre><code class="language-python">def get_next_node(self, curr, action):
+    nxt = curr.successors.get(action or &quot;default&quot;)
+    if not nxt and curr.successors:
+        warnings.warn(&quot;Flow ends&quot;)
+    return nxt
+</code></pre>
+<p>This tells you three important things.</p>
+<p>First, the flow looks for the exact action string.</p>
+<p>Second, if there is no action, it tries <code>&quot;default&quot;</code>.</p>
+<p>Third, if the node has successors but none match, the flow warns and stops.</p>
+<p>That warning is useful. It usually means you have a typo in an action name or forgot to connect one door.</p>
+<pre class="mermaid">sequenceDiagram
+participant C as Caller
+participant F as Flow
+participant D as Decision
+participant S as Search
+C->>F: Start flow with question
+F->>D: Run decision node
+D-->>F: Return action search
+F->>S: Open matching door
+S-->>F: Return action decide
+F->>D: Loop back to decision
+</pre>
+<h2>Branching without hard-coded control flow</h2>
+<p>The power of successors is that the decision logic and the graph wiring are separate.</p>
+<p>Inside the node, you can use any logic you want.</p>
+<p>For example, the research agent’s decision node may return an action chosen by an LLM:</p>
+<pre><code class="language-python">if exec_res[&quot;action&quot;] == &quot;search&quot;:
+    shared[&quot;search_query&quot;] = exec_res[&quot;search_query&quot;]
+return exec_res[&quot;action&quot;]
+</code></pre>
+<p>The flow does not need to know why the node chose <code>&quot;search&quot;</code>.</p>
+<p>It only needs to know where <code>&quot;search&quot;</code> leads.</p>
+<p>That is like a worker saying, “I need the search room,” while the signs above the doors already tell them where it is.</p>
+<h2>Looping by pointing back</h2>
+<p>Successors make loops simple.</p>
+<p>In the research agent:</p>
+<pre><code class="language-python">search - &quot;decide&quot; &gt;&gt; decide
+</code></pre>
+<p>creates a loop:</p>
+<ol>
+<li>Decide what to do.</li>
+<li>Search if needed.</li>
+<li>Go back and decide again.</li>
+</ol>
+<p>The loop stops when the flow reaches a node that does not have a matching door.</p>
+<p>For example, <code>AnswerQuestion</code> returns <code>&quot;done&quot;</code>, but it has no successor table entries.</p>
+<p>So the flow ends quietly.</p>
+<p>This is a common pattern:</p>
+<ul>
+<li>a node with successors continues</li>
+<li>a terminal node without successors stops the run</li>
+</ul>
+<h2>One node can have many doors</h2>
+<p>A node is not limited to one next step.</p>
+<p>It can have several labeled exits:</p>
+<pre><code class="language-python">router - &quot;yes&quot; &gt;&gt; yes_node
+router - &quot;no&quot; &gt;&gt; no_node
+router - &quot;retry&quot; &gt;&gt; retry_node
+</code></pre>
+<p>Then <code>post</code> chooses which label to return:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    if shared[&quot;score&quot;] &gt; 80:
+        return &quot;yes&quot;
+    if shared[&quot;score&quot;] &lt; 50:
+        return &quot;no&quot;
+    return &quot;retry&quot;
+</code></pre>
+<p>This is very useful for agents.</p>
+<p>The LLM can say <code>&quot;tool_a&quot;</code>, <code>&quot;tool_b&quot;</code>, <code>&quot;ask_user&quot;</code>, or <code>&quot;finish&quot;</code>.</p>
+<p>You do not need to rewrite the flow every time you add a new behavior.</p>
+<p>You just add another door:</p>
+<pre><code class="language-python">router - &quot;tool_c&quot; &gt;&gt; tool_c_node
+</code></pre>
+<h2>A few gotchas</h2>
+<h3>1. One action string can only point to one node</h3>
+<p>If you connect the same action twice, the second connection replaces the first:</p>
+<pre><code class="language-python">decide - &quot;search&quot; &gt;&gt; web_search
+decide - &quot;search&quot; &gt;&gt; cache_search
+</code></pre>
+<p>Pocket Flow will warn you that it is overwriting a successor.</p>
+<p>This is usually good because accidental overwrites are easy to miss otherwise.</p>
+<h3>2. Running a node alone does not follow its successors</h3>
+<p>You can test a single node directly:</p>
+<pre><code class="language-python">node.run(shared)
+</code></pre>
+<p>But if that node has successors, Pocket Flow warns you.</p>
+<p>Why?</p>
+<p>Because running one node is only running one station. It does not automatically walk through the corridor.</p>
+<p>For full graph execution, use <a href="04_flow.html">Flow</a>.</p>
+<h3>3. Action strings must match exactly</h3>
+<p>Successors are just dictionary keys.</p>
+<p>That means these are different:</p>
+<pre><code class="language-python">&quot;search&quot;
+&quot;Search&quot;
+&quot;seach&quot;
+</code></pre>
+<p>If your node returns <code>&quot;seach&quot;</code> but the door is labeled <code>&quot;search&quot;</code>, the flow will not magically fix it.</p>
+<p>Clear naming helps a lot here, just like with <a href="01_shared.html">shared</a>.</p>
+<h2>The mental model to keep</h2>
+<p>When you see successors, think:</p>
+<blockquote>
+<p>“These are signs above doors.”</p>
+</blockquote>
+<p>A node finishes and says one action word.</p>
+<p>The successor table maps that word to the next node.</p>
+<p>That lets flows branch, loop, and grow without turning the whole program into a pile of hard-coded <code>if</code> statements.</p>
+<p>Now you know how one node hands off to another.</p>
+<p>But who keeps running this corridor?<br />
+Who chooses where the flow starts?<br />
+And what happens when a whole flow becomes one door inside a bigger flow?</p>
+<p>That is exactly what the next chapter covers: <a href="04_flow.html">Flow</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="02_node.html">&larr; Node</a></span>
+    <span><a href="04_flow.html">Flow &rarr;</a></span>
+  </nav>
+</body>
+</html>

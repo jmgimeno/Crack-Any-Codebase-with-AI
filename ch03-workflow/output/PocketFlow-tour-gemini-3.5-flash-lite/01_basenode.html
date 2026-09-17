@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BaseNode — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 1: BaseNode</h1>
+<p>Have you ever watched an assembly line in a factory? Raw components arrive at the first station, a worker performs a specific action—like tightening a bolt or soldering a wire—and then passes the modified part down the line to the next person.</p>
+<p>What happens if you try to build an LLM application without a clean structure? Your code quickly turns into a tangled bowl of spaghetti. Prompts, API calls, and data transformations get mashed together into massive functions, making it nearly impossible to debug or scale.</p>
+<p>In <a href="01_basenode.html">PocketFlow</a>, the fundamental building block representing a single step or operation is the <code>BaseNode</code>. It functions exactly like an individual worker on an assembly line passing components to the next station.</p>
+<hr />
+<h3>The Three-Phase Lifecycle</h3>
+<p>Instead of cramming all your logic into a single monolithic function, <code>BaseNode</code> breaks every operation down into a clear, three-phase lifecycle:</p>
+<ol>
+<li><strong><code>prep(shared)</code></strong>: Pulls the exact data your worker needs from a shared state dictionary.</li>
+<li><strong><code>exec(prep_res)</code></strong>: Performs the heavy lifting (like calling an LLM or running a calculation) using <em>only</em> the prepared data.</li>
+<li><strong><code>post(shared, prep_res, exec_res)</code></strong>: Takes the results, updates the shared state, and decides what happens next.</li>
+</ol>
+<p>Here is what the core structure looks like in code:</p>
+<pre><code class="language-python">from pocketflow import BaseNode
+
+class ProcessStep(BaseNode):
+    def prep(self, shared):
+        return shared.get(&quot;input_data&quot;)
+</code></pre>
+<p>Next, the worker executes its designated task:</p>
+<pre><code class="language-python">    def exec(self, prep_res):
+        return prep_res.upper()
+</code></pre>
+<p>Finally, the aftermath phase saves the work:</p>
+<pre><code class="language-python">    def post(self, shared, prep_res, exec_res):
+        shared[&quot;output_data&quot;] = exec_res
+        return &quot;default&quot;
+</code></pre>
+<hr />
+<h3>How Data Moves Through a Node</h3>
+<p>To visualize how data flows through these three phases, let's look at the lifecycle sequence:</p>
+<pre class="mermaid">sequenceDiagram
+    participant S as Shared Store
+    participant N as BaseNode
+    
+    S->>N: Provide shared state
+    N->>N: Prepare data in prep method
+    N->>N: Execute task in exec method
+    N->>S: Update state in post method
+</pre>
+<p>When you call a node, it executes these methods in strict sequence behind the scenes via its internal run mechanism, keeping your data pipeline predictable and easy to reason about.</p>
+<hr />
+<h3>Looking Ahead</h3>
+<p>Now that you understand how an individual worker processes data step-by-step using <code>BaseNode</code>, you might wonder: what happens when things go wrong? What if an API call times out or an LLM returns malformed text?</p>
+<p>That brings us to the next chapter, where we look at <a href="02_node.html">Node</a> and how to handle retries and failures gracefully.</p>
+
+  <nav class="chapter-nav">
+    <span>&nbsp;</span>
+    <span><a href="02_node.html">Node &rarr;</a></span>
+  </nav>
+</body>
+</html>

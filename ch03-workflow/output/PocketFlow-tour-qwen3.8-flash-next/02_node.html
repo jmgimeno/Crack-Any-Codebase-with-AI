@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Node — PocketFlow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; PocketFlow tour</a></p>
+<h1>Chapter 2: Node</h1>
+<p>Imagine your research assistant fails in the middle of a web search.</p>
+<p>If all the logic lives in one giant function, you have a problem: do you rerun the LLM decision? Do you reread the question? Do you throw away partial progress?</p>
+<p>You want something more like an assembly line station.</p>
+<p>One station does one job:</p>
+<ul>
+<li>gather what it needs</li>
+<li>do its work</li>
+<li>write down what happened</li>
+<li>say what should happen next</li>
+</ul>
+<p>That is a <strong>Node</strong>.</p>
+<p>In <a href="01_shared.html">shared</a>, you met the whiteboard that travels through a run. A node is the worker who reads from that whiteboard, does something useful, and writes back to it.</p>
+<h2>One station, three jobs</h2>
+<p>A Pocket Flow node usually overrides three methods:</p>
+<pre><code class="language-python">from pocketflow import Node
+
+class SearchWeb(Node):
+    def prep(self, shared):
+        return shared[&quot;search_query&quot;]
+</code></pre>
+<p>This is <code>prep</code>.</p>
+<p>It reads inputs from the shared whiteboard. It does not do the expensive work yet. It just gathers ingredients.</p>
+<p>Here, the node says: “Before I search, I need the current query.”</p>
+<p>Next comes <code>exec</code>:</p>
+<pre><code class="language-python">def exec(self, search_query):
+    print(f&quot;Searching for {search_query}&quot;)
+    return search_web_duckduckgo(search_query)
+</code></pre>
+<p>This is the main task.</p>
+<p>It takes what <code>prep</code> returned and produces a result. If this were a real assembly line station, this is where the machine actually presses, paints, or assembles the part.</p>
+<p>Then comes <code>post</code>:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    previous = shared.get(&quot;context&quot;, &quot;&quot;)
+    shared[&quot;context&quot;] = previous + &quot;\n\n&quot; + exec_res
+    return &quot;decide&quot;
+</code></pre>
+<p>This does two jobs:</p>
+<ol>
+<li>Save results back into <code>shared</code>.</li>
+<li>Return a routing signal that tells the flow what to run next.</li>
+</ol>
+<p>Notice the last line:</p>
+<pre><code class="language-python">return &quot;decide&quot;
+</code></pre>
+<p>That string is not automatically stored in <code>shared</code>. It is a signal for the flow. The <a href="03_successors.html">successors</a> chapter explains how that signal becomes a path through the graph.</p>
+<h2>What the framework actually does</h2>
+<p>Under the hood, running a node looks roughly like this:</p>
+<pre><code class="language-python">inputs = node.prep(shared)
+result = node.exec(inputs)
+action = node.post(shared, inputs, result)
+</code></pre>
+<p>The same <code>shared</code> dictionary from <a href="01_shared.html">shared</a> is passed into <code>prep</code> and <code>post</code>.</p>
+<p>That gives you a clean separation:</p>
+<ul>
+<li><code>prep</code> reads state.</li>
+<li><code>exec</code> does the work.</li>
+<li><code>post</code> writes state and chooses what happens next.</li>
+</ul>
+<p>This is useful because each part can fail or be replaced independently. If your search step times out, you can retry just that station without rerunning the whole system.</p>
+<pre class="mermaid">sequenceDiagram
+participant C as Caller
+participant F as Flow
+participant N as Node
+participant S as Shared
+C->>F: Start flow with shared state
+F->>N: Run current node
+N->>S: Read inputs from shared state
+N-->>F: Return action for routing
+</pre>
+<h2>A decision node is still just a station</h2>
+<p>The research agent example has a <code>DecideAction</code> node. Its job is to look at the question and decide whether to search or answer.</p>
+<p>First, it gathers what it needs:</p>
+<pre><code class="language-python">class DecideAction(Node):
+    def prep(self, shared):
+        context = shared.get(&quot;context&quot;, &quot;No previous search&quot;)
+        return shared[&quot;question&quot;], context
+</code></pre>
+<p>Then it does the main work:</p>
+<pre><code class="language-python">def exec(self, inputs):
+    question, context = inputs
+    return ask_llm_for_action(question, context)
+</code></pre>
+<p>Finally, it writes state and returns a routing signal:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    if exec_res[&quot;action&quot;] == &quot;search&quot;:
+        shared[&quot;search_query&quot;] = exec_res[&quot;search_query&quot;]
+    return exec_res[&quot;action&quot;]
+</code></pre>
+<p>This is the same three-step pattern as before.</p>
+<p>The node does not know which nodes exist. It only returns a word like <code>&quot;search&quot;</code> or <code>&quot;answer&quot;</code>. The flow later decides where that word leads.</p>
+<h2>What if <code>post</code> returns nothing?</h2>
+<p>If your <code>post</code> method does not return anything, Pocket Flow treats the result as the default path.</p>
+<p>That is handy for simple linear steps:</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    shared[&quot;summary&quot;] = exec_res
+</code></pre>
+<p>In that case, a flow can continue through a <code>default</code> successor if one exists.</p>
+<h2>A node can be tested by itself</h2>
+<p>Because a node is just an object with methods, you can test it directly:</p>
+<pre><code class="language-python">node = SearchWeb()
+shared = {&quot;search_query&quot;: &quot;Nobel Prize in Physics 2024&quot;}
+action = node.run(shared)
+print(action)
+</code></pre>
+<p>This runs only that one station.</p>
+<p>It does not automatically run the next node. If a node has successors, Pocket Flow warns you to use <a href="04_flow.html">Flow</a> for full graph execution. That separation keeps nodes simple and easy to reason about.</p>
+<h2>Nodes can also have retries</h2>
+<p>Real work fails: APIs time out, LLMs return bad JSON, web searches glitch.</p>
+<p>Pocket Flow’s <code>Node</code> adds retry behavior around <code>exec</code>:</p>
+<pre><code class="language-python">summarize = Summarize(max_retries=3, wait=1)
+</code></pre>
+<p>That means it will try the main task up to three times, waiting one second between attempts.</p>
+<p>You can also provide a fallback:</p>
+<pre><code class="language-python">class Summarize(Node):
+    def exec_fallback(self, prep_res, exc):
+        return &quot;There was an error processing your request.&quot;
+</code></pre>
+<p>Think of this like having a backup operator at the station. If the main machine keeps failing, the backup step prevents the whole line from stopping completely.</p>
+<h2>Nodes can read configuration too</h2>
+<p>Sometimes a node needs settings that are not really run data: which filter to apply, which file to read, which subflow to use.</p>
+<p>Those often live in <code>self.params</code>:</p>
+<pre><code class="language-python">def prep(self, shared):
+    return shared[&quot;image&quot;], self.params[&quot;filter&quot;]
+</code></pre>
+<p>That is different from <code>shared</code>. The <a href="05_params.html">params</a> chapter covers that idea more clearly later.</p>
+<h2>Good habits for writing nodes</h2>
+<h3>Keep each step doing one thing</h3>
+<p>If your <code>exec</code> method reads files, calls an LLM, parses YAML, updates state, and chooses the next node all at once, it becomes hard to debug.</p>
+<p>A better split looks like:</p>
+<ul>
+<li><code>prep</code>: gather inputs</li>
+<li><code>exec</code>: do the main task</li>
+<li><code>post</code>: save results and route</li>
+</ul>
+<h3>Let <code>exec</code> be the expensive part</h3>
+<p>If something can fail or retry, it usually belongs in <code>exec</code>. That is where Pocket Flow gives you retry support.</p>
+<h3>Let <code>post</code> handle routing</h3>
+<p>Do not try to make a node jump to another node by itself inside <code>exec</code>. Return an action from <code>post</code>, then connect that action to the next node using <a href="03_successors.html">successors</a>.</p>
+<h3>Reuse the pattern for larger shapes</h3>
+<p>Once you understand this three-part station, other building blocks become easier.</p>
+<p>For example:</p>
+<ul>
+<li><a href="06_batchnode.html">BatchNode</a> runs a similar pattern over many items</li>
+<li><a href="08_asyncnode.html">AsyncNode</a> does the same thing asynchronously</li>
+</ul>
+<p>The core idea stays the same: one station, three jobs.</p>
+<h2>The mental model to keep</h2>
+<p>When you see <code>Node</code>, think:</p>
+<blockquote>
+<p>“This is one worker at one assembly line station.”</p>
+</blockquote>
+<p>It reads from the shared whiteboard, does its task, writes back what it learned, and hands a small routing note to the flow.</p>
+<p>That is all it needs to do.</p>
+<p>Now you know what happens inside a single station. The next natural question is: how does the flow know which station should run after <code>&quot;search&quot;</code> or <code>&quot;answer&quot;</code>? That mapping is exactly what the next chapter covers: <a href="03_successors.html">successors</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="01_shared.html">&larr; shared</a></span>
+    <span><a href="03_successors.html">successors &rarr;</a></span>
+  </nav>
+</body>
+</html>

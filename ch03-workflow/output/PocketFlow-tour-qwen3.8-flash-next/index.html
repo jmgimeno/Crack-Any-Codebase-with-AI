@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PocketFlow tour</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <h1>PocketFlow</h1>
+  <p class="muted">Lens: <span class="lens">beginner-tutorial</span> &middot; 9 chapters &middot; 17 files analyzed</p>
+  <p>Pocket Flow is a minimalist LLM framework that models applications as graphs of reusable nodes and flows. It keeps state in shared dictionaries while supporting sync, async, batch, and nested workflows.</p>
+
+  <h2>Architecture map</h2>
+  <pre class="mermaid">
+flowchart TD
+    A0["shared"]
+    A1["Node"]
+    A2["successors"]
+    A3["Flow"]
+    A4["params"]
+    A5["BatchNode"]
+    A6["BatchFlow"]
+    A7["AsyncNode"]
+    A8["AsyncFlow"]
+    A3 -- "passes through nodes" --> A0
+    A1 -- "reads and writes" --> A0
+    A1 -- "defines routing table" --> A2
+    A3 -- "follows returned actions" --> A2
+    A3 -- "supplies per-run settings" --> A4
+    A1 -- "reads for reusable behavior" --> A4
+    A5 -- "extends with per-item executio" --> A1
+    A6 -- "repeats nested flow for each i" --> A3
+    A6 -- "generates one params set per i" --> A4
+    A7 -- "extends with awaitable lifecyc" --> A1
+    A8 -- "orchestrates sync and async no" --> A3
+    A8 -- "enables queue-based communicat" --> A0
+  </pre>
+
+  <h2>Read in order</h2>
+  <ol>
+    <li><a href="01_shared.html">shared</a></li>
+    <li><a href="02_node.html">Node</a></li>
+    <li><a href="03_successors.html">successors</a></li>
+    <li><a href="04_flow.html">Flow</a></li>
+    <li><a href="05_params.html">params</a></li>
+    <li><a href="06_batchnode.html">BatchNode</a></li>
+    <li><a href="07_batchflow.html">BatchFlow</a></li>
+    <li><a href="08_asyncnode.html">AsyncNode</a></li>
+    <li><a href="09_asyncflow.html">AsyncFlow</a></li>
+  </ol>
+
+  <h2>Files the LLM picked</h2>
+<p>This codebase is PocketFlow, a tiny LLM workflow framework whose core abstractions are Node, Flow, BatchNode, and async variants, with the cookbook serving as the practical documentation of how those primitives compose into agents, workflows, RAG, and batch pipelines. I picked the library core plus representative entry points and concrete implementations for each base class: a research agent for Node/Flow, map-reduce and batch flows for BatchNode/BatchFlow, multi-agent and parallel-batch files for async execution, RAG for nested flows, and a coding agent for Flow-as-node tool loops. I avoided repeated cookbook variants, provider wrappers, tracing, packaging, and other project plumbing so the selected files expose the architecture rather than incidental integrations.</p>
+
+  <ul class="files">
+    <li><code>cookbook/pocketflow-agent/main.py</code></li>
+    <li><code>cookbook/pocketflow-multi-agent/main.py</code></li>
+    <li><code>pocketflow/__init__.py</code></li>
+    <li><code>README.md</code></li>
+    <li><code>cookbook/pocketflow-agent/flow.py</code></li>
+    <li><code>cookbook/pocketflow-agent/nodes.py</code></li>
+    <li><code>cookbook/pocketflow-node/flow.py</code></li>
+    <li><code>cookbook/pocketflow-map-reduce/nodes.py</code></li>
+    <li><code>cookbook/pocketflow-batch-flow/flow.py</code></li>
+    <li><code>cookbook/pocketflow-batch-flow/nodes.py</code></li>
+    <li><code>cookbook/pocketflow-parallel-batch-flow/flow.py</code></li>
+    <li><code>cookbook/pocketflow-parallel-batch-flow/nodes.py</code></li>
+    <li><code>cookbook/pocketflow-rag/flow.py</code></li>
+    <li><code>cookbook/pocketflow-rag/nodes.py</code></li>
+    <li><code>cookbook/pocketflow-coding-agent/flow.py</code></li>
+    <li><code>cookbook/pocketflow-coding-agent/nodes.py</code></li>
+    <li><code>cookbook/pocketflow-nested-batch/flow.py</code></li>
+  </ul>
+</body>
+</html>
