@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WriteChapters — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 6: WriteChapters</h1>
+<p>You have successfully scanned the repository with <a href="03_smartcrawl.html">SmartCrawl</a>. You have extracted the core concepts with <a href="04_analyze.html">Analyze</a>. You have even mapped the complex relationships between them using <a href="05_relate.html">Relate</a>.</p>
+<p>You are sitting on a goldmine of information. But right now, that information is just a pile of data sitting in the computer's memory. If you handed this raw data to a new developer, they wouldn't find it helpful. They would find it overwhelming.</p>
+<p>Data is not knowledge. Knowledge requires a narrative.</p>
+<p>To turn our data into a guide, we need a storyteller. This is the final stage of our <a href="01_flow.html">Flow</a>: the <strong>WriteChapters</strong> <a href="02_node.html">Node</a>.</p>
+<h3>The Storyteller's Problem</h3>
+<p>Most AI agents work by &quot;batching.&quot; If you ask an AI to write ten different summaries of ten different files, it treats each task as an isolated event. It finishes Task A, forgets everything, and moves to Task B.</p>
+<p>If we used a standard <a href="02_node.html">BatchNode</a> for our tutorial, we would end up with ten disconnected pages. Chapter 1 might introduce a concept, but Chapter 2 wouldn't know Chapter 1 ever happened. The &quot;story&quot; would feel jumpy, repetitive, and disjointed—like reading a book where every chapter was written by a different person who never spoke to their colleagues.</p>
+<p>A great storyteller knows that Chapter 2 depends on the context established in Chapter 1. To write a cohesive guide, our writer needs to remember what they said previously.</p>
+<h3>Sequential Context: Writing the Narrative</h3>
+<p>To solve this, <code>WriteChapters</code> is a special kind of <a href="02_node.html">Node</a>. It does not work in parallel; it works sequentially. It carries the &quot;memory&quot; of the previous chapters forward into the prompt for the next one.</p>
+<p>Here is how the <code>exec</code> stage handles this &quot;memory&quot; in <code>nodes.py</code>:</p>
+<pre><code class="language-python">for i, name in enumerate(ctx[&quot;order&quot;]):
+    # Combine previous chapters to create context
+    prev = &quot;\n\n---\n\n&quot;.join(prev_chapters)
+    
+    prompt = load_prompt(&quot;write-chapter.md&quot;).format(
+        name=name,
+        prev_chapters=prev,
+        # ... other context ...
+    )
+    content = call_llm(prompt)
+    chapters.append({&quot;name&quot;: name, &quot;content&quot;: content})
+    prev_chapters.append(content)
+</code></pre>
+<p>In this loop, <code>prev_chapters</code> acts as the writer's notebook. Every time a new chapter is written, it is added to the notebook. When the next chapter begins, the AI is given the entire notebook as context.</p>
+<p>This ensures that if Chapter 1 explains a &quot;Database&quot; concept, Chapter 2 can say, &quot;Now that you understand the Database, let's see how it interacts with the User...&quot; instead of re-explaining the Database from scratch.</p>
+<h3>The Writer's Workflow</h3>
+<p>The <code>WriteChapters</code> node takes the structural blueprint provided by the previous steps and weaves them together. It uses the &quot;order&quot; from <a href="04_analyze.html">Analyze</a> to ensure the learning path is logical, and it uses the &quot;relationships&quot; from <a href="05_relate.html">Relate</a> to build bridges between topics.</p>
+<pre class="mermaid">sequenceDiagram
+    participant O as Order
+    participant W as Writer
+    participant L as LLM
+    participant C as Chapters
+
+    O->>W: Provide next topic
+    W->>L: Send topic and previous chapters
+    L-->>W: Return new chapter
+    W->>C: Save chapter in sequence
+</pre>
+<p>The writer follows these rules to ensure the output is high-quality:</p>
+<ol>
+<li><strong>The Problem-First Approach</strong>: It doesn't start with &quot;The Authentication module is...&quot; It starts with &quot;How does the system know who you are?&quot;</li>
+<li><strong>Incremental Complexity</strong>: It uses the order established by the <a href="04_analyze.html">Analyze</a> node to ensure the reader isn't thrown into the deep end too early.</li>
+<li><strong>The Contextual Thread</strong>: By receiving the <code>prev_chapters</code>, it maintains a consistent tone and vocabulary throughout the entire tour.</li>
+</ol>
+<h3>The Final Product</h3>
+<p>Once the <code>WriteChapters</code> node finishes its loop, the <a href="01_flow.html">Flow</a> is complete. The <code>shared</code> memory now contains a list of perfectly ordered, contextually aware markdown chapters.</p>
+<p>The final step—handled by <code>main.py</code>—is to take these markdown chapters and the architecture map created by <a href="05_relate.html">Relate</a> and wrap them in a beautiful HTML template.</p>
+<p>The result is a professional, interactive &quot;Codebase Tour.&quot; It includes:</p>
+<ul>
+<li>An <strong>Architecture Map</strong> (a visual Mermaid diagram of your project).</li>
+<li>A <strong>Guided Reading List</strong> of chapters.</li>
+<li><strong>Detailed Content</strong> that explains not just <em>what</em> the code is, but <em>why</em> it exists and <em>how</em> it works.</li>
+</ul>
+<p>You have successfully transformed a chaotic, thousands-of-files repository into a structured, human-readable knowledge base. The machine has done the heavy lifting of reading, analyzing, and relating; now, the human can finally focus on what matters most: building.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="05_relate.html">&larr; Relate</a></span>
+    <span>&nbsp;</span>
+  </nav>
+</body>
+</html>

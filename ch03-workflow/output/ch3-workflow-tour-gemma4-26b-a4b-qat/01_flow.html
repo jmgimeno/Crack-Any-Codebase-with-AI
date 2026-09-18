@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flow — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 1: Flow</h1>
+<p>How do you keep a massive project on track when you have hundreds of moving parts? If you try to handle everything at once, you end up with a tangled mess of half-finished work. You need a way to ensure that step B never starts until step A is completely finished.</p>
+<p>In this codebase, that responsibility belongs to the <strong>Flow</strong>.</p>
+<p>Think of the Flow as a project manager. A project manager doesn't do the actual coding, the searching, or the writing. Instead, they hold the blueprint. They know that first, we must find the files, then we must understand what is inside them, then we must see how those things connect, and finally, we write the summary. If the manager fails to pass the files to the analyst, the whole project stalls.</p>
+<p>Here is how that blueprint is defined in <code>flow.py</code>:</p>
+<pre><code class="language-python">def create_tour_flow() -&gt; Flow:
+    crawl = SmartCrawl()
+    analyze = Analyze()
+    relate = Relate()
+    write = WriteChapters()
+
+    crawl &gt;&gt; analyze &gt;&gt; relate &gt;&gt; write
+    return Flow(start=crawl)
+</code></pre>
+<p>The <code>&gt;&gt;</code> symbol is the orchestrator's hand. It tells the program to take the output from the left side and hand it directly to the right side. This creates a strict, organized sequence. Without this connection, a tool like <a href="03_smartcrawl.html">SmartCrawl</a> might find the files, but the <a href="04_analyze.html">Analyze</a> step wouldn't know they exist.</p>
+<p>The Flow ensures that each specialized worker receives exactly what it needs, exactly when it needs it.</p>
+<pre class="mermaid">sequenceDiagram
+    participant F as Flow
+    participant C as SmartCrawl
+    participant A as Analyze
+    participant R as Relate
+    participant W as WriteChapters
+
+    F->>C: Start crawl
+    C-->>F: Provide files
+    F->>A: Analyze files
+    A-->>F: Provide abstractions
+    F->>R: Link relations
+    R-->>F: Provide relations
+    F->>W: Write chapters
+    W-->>F: Provide chapters
+</pre>
+<p>Every component in this sequence is a specialized <a href="02_node.html">Node</a>. The Flow doesn't care how a node works; it only cares about <em>when</em> it works and where its results should go next. It turns a collection of independent tools into a single, cohesive machine.</p>
+<p>Now that you understand the master plan, let's meet the individual workers that make it possible. In the next chapter, we will dive into the <a href="02_node.html">Node</a>.</p>
+
+  <nav class="chapter-nav">
+    <span>&nbsp;</span>
+    <span><a href="02_node.html">Node &rarr;</a></span>
+  </nav>
+</body>
+</html>

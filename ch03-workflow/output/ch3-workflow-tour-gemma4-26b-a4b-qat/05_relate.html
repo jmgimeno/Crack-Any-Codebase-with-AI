@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Relate — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 5: Relate</h1>
+<p>You have a list of the most important concepts in the project. You know that <code>User Authentication</code> is a key part of the system, and you know that <code>Database Connection</code> is another. But a list of nouns is just a grocery list—it doesn't tell you how to cook the meal.</p>
+<p>How does the <code>User Authentication</code> system actually talk to the <code>Database Connection</code>? Does the user's data flow through a specific manager, or does the authentication service call the database directly?</p>
+<p>If you don't know how these pieces interact, you are looking at a pile of isolated islands. To understand a codebase, you need to see the bridges that connect them.</p>
+<p>The <strong>Relate</strong> <a href="02_node.html">Node</a> is our cartographer. Its job is to take the &quot;cities&quot; identified by <a href="04_analyze.html">Analyze</a> and draw the &quot;roads&quot; between them.</p>
+<h3>The Cartographer's Strategy</h3>
+<p>Mapping a codebase is harder than listing its parts. To find a connection, the AI has to look at how data moves between different modules. It's not enough to know that two things exist; the AI must prove they interact.</p>
+<p>The <code>Relate</code> node performs this mapping using the standard three-stage lifecycle.</p>
+<p>First, it must prepare the map. In the <code>prep</code> stage, the node gathers the descriptions of the concepts found by <a href="04_analyze.html">Analyze</a> and combines them with the full codebase. It creates a summary list so the AI knows exactly which &quot;cities&quot; it is looking for.</p>
+<pre><code class="language-python">def prep(self, shared):
+    listing = &quot;\n&quot;.join(
+        f&quot;- {a['name']}: {a['description'].strip()}&quot; 
+        for a in shared[&quot;abstractions&quot;]
+    )
+    return load_prompt(&quot;analyze-relationships.md&quot;).format(
+        abstractions=listing, codebase=shared[&quot;codebase&quot;]
+    )
+</code></pre>
+<p>Next, it enters the <code>exec</code> stage. The node sends this structured list and the codebase to the LLM. We aren't asking the AI to &quot;understand the code&quot; generally; we are giving it a very specific task: &quot;Find the links between these specific concepts.&quot;</p>
+<pre><code class="language-python">def exec(self, prompt):
+    # The AI returns a list of connections
+    result = parse_yaml(call_llm(prompt))
+    return result[&quot;relationships&quot;]
+</code></pre>
+<p>Finally, the <code>post</code> stage handles the handover. Once the connections are mapped, the node saves them into the <a href="01_flow.html">Flow</a> shared memory.</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    # Store the connections for the next worker
+    shared[&quot;relationships&quot;] = exec_res
+    print(f&quot;  Found {len(exec_res)} relationships&quot;)
+</code></pre>
+<h3>Creating the Map</h3>
+<p>Think of this process like studying a social network. <code>Analyze</code> tells you who the most popular people are. <code>Relate</code> tells you that Person A is the boss of Person B, and Person B is the coworker of Person C.</p>
+<p>When the <code>Relate</code> node finishes, it has produced a set of &quot;edges&quot;—directional connections that describe the flow of the system.</p>
+<pre class="mermaid">sequenceDiagram
+    participant A as Abstractions
+    participant R as Relate Node
+    participant L as LLM
+    participant S as Shared Memory
+
+    A->>R: Pass concept list
+    R->>L: Send relationship prompt
+    L-->>R: Return connections
+    R->>S: Save map of relations
+</pre>
+<p>By the end of this step, we have transformed a flat list of concepts into a web of intelligence. We don't just know <em>what</em> is in the codebase; we know <em>how</em> it works.</p>
+<p>Now that we have a map of the concepts and the roads connecting them, we have everything we need to tell the story. We have the landmarks, the paths, and the logic. In the next chapter, we will see how <a href="06_writechapters.html">WriteChapters</a> takes all of this information and weaves it into a cohesive narrative.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="04_analyze.html">&larr; Analyze</a></span>
+    <span><a href="06_writechapters.html">WriteChapters &rarr;</a></span>
+  </nav>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SmartCrawl — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 3: SmartCrawl</h1>
+<p>What happens when you try to read every single file in a massive GitHub repository?</p>
+<p>If you are exploring a codebase like React or VS Code, you are looking at tens of thousands of files. Most of them are configuration settings, documentation, or auto-generated code that has nothing to do with the actual logic. If you tried to feed all of that into an AI, you would hit &quot;token limits&quot; (the AI's memory limit) instantly, and you would spend a fortune on API costs just to read files that don't matter.</p>
+<p>You don't need to read everything. You just need to find the landmarks.</p>
+<p>In our <a href="01_flow.html">Flow</a>, <strong>SmartCrawl</strong> acts as the scout. Its only job is to scan the territory and decide: &quot;These 15 files are the soul of this project. Ignore everything else.&quot;</p>
+<h3>The Scout's Notebook</h3>
+<p>Because we can't send full files to the AI yet, the <code>SmartCrawl</code> <a href="02_node.html">Node</a> first creates a &quot;manifest.&quot; Think of this as a scout's notebook: it doesn't contain the whole city, just a list of streets and a tiny description of what is on each corner.</p>
+<p>In the <code>prep</code> stage, the node scans the directory and creates a snippet for every file:</p>
+<pre><code class="language-python">def prep(self, shared):
+    files = list_files(shared[&quot;repo_path&quot;])
+    manifest_parts = []
+    for i, path in enumerate(files):
+        # We only take a small 'preview' to save space
+        preview = safe_read(path)[:800] 
+        manifest_parts.append(f&quot;  [{i}] {path}\n{preview}&quot;)
+    
+    # Combine everything into one big list for the AI
+    manifest = &quot;\n&quot;.join(manifest_parts)
+    return manifest, files
+</code></pre>
+<p>By only taking the first few hundred characters of each file, we can represent a massive codebase in a single, manageable text block.</p>
+<h3>The Interview</h3>
+<p>Once the scout has their notebook, they go to the expert (the LLM) and ask which files are important. This happens in the <code>exec</code> stage. We don't ask the AI to &quot;read the code&quot;; we ask it to &quot;pick the indices.&quot;</p>
+<pre><code class="language-python">def exec(self, manifest):
+    # We ask the AI to return a YAML list of the file numbers
+    prompt = load_prompt(&quot;select-files.md&quot;).format(manifest=manifest)
+    result = parse_yaml(call_llm(prompt))
+    return result[&quot;selected&quot;] # e.g., [0, 5, 12, 42]
+</code></pre>
+<p>This is highly efficient. We are asking the AI to perform a high-level filtering task using only metadata and tiny snippets, rather than deep architectural analysis.</p>
+<p>Here is how the data flows through the SmartCrawl node:</p>
+<pre class="mermaid">sequenceDiagram
+    participant F as Files
+    participant S as SmartCrawl
+    participant L as LLM
+    participant D as Shared Data
+
+    F->>S: Provide file paths
+    S->>S: Create manifest with previews
+    S->>L: Send manifest
+    L-->>S: Return selected indices
+    S->>S: Read full content of selected files
+    S->>D: Store selected code
+</pre>
+<h3>The Handover</h3>
+<p>The scout's job isn't finished once they find the files. They have to actually go back and collect the &quot;loot&quot;—the full, unabridged source code of those specific files—and hand it off to the next worker.</p>
+<p>This happens in the <code>post</code> stage. The node takes those indices, opens the real files, and stores their full contents in the <a href="01_flow.html">Flow</a> &quot;shared&quot; memory.</p>
+<pre><code class="language-python">def post(self, shared, prep_res, exec_res):
+    selected_indices = exec_res
+    full_code = []
+    for i in selected_indices:
+        content = safe_read(files[i])
+        full_code.append(content)
+    
+    # This 'codebase' variable is what the next Node will use
+    shared[&quot;codebase&quot;] = &quot;\n\n&quot;.join(full_code)
+</code></pre>
+<p>By the end of this step, the &quot;noise&quot; of the repository has been eliminated. The <code>shared</code> state no longer contains 10,000 files; it contains only the high-density, high-value code that defines the project's architecture.</p>
+<p>Now that the scout has identified the landmarks, the team can actually start studying them. In the next chapter, we will see how the <a href="04_analyze.html">Analyze</a> node takes this concentrated code and extracts the core concepts.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="02_node.html">&larr; Node</a></span>
+    <span><a href="04_analyze.html">Analyze &rarr;</a></span>
+  </nav>
+</body>
+</html>

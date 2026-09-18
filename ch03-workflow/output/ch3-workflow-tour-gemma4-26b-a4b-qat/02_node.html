@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Node — workflow</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; workflow tour</a></p>
+<h1>Chapter 2: Node</h1>
+<p>What happens when a single part of a complex process fails?</p>
+<p>If you write one massive, monolithic script that tries to do everything, finding a bug is like looking for a needle in a haystack. If the AI returns slightly malformed data, the entire program might crash, leaving you with no idea which part of the logic actually failed.</p>
+<p>To solve this, we don't build one giant machine. Instead, we build a <a href="01_flow.html">Flow</a> made of many small, independent units called <strong>Nodes</strong>.</p>
+<p>A Node is a single, discrete step in a workflow. Think of it like a specialized worker on an assembly line. This worker has one specific job—perhaps they only polish gears, or they only inspect labels. They receive specific inputs, perform exactly one job, and then pass the results forward to the next person.</p>
+<pre class="mermaid">sequenceDiagram
+    participant D as Input Data
+    participant N as Node
+    participant A as AI Model
+    participant R as Result Data
+
+    D->>N: Pass data
+    N->>N: Prepare task
+    N->>A: Send prompt
+    A->>N: Return response
+    N->>R: Pass result
+</pre>
+<h3>The Three Stages of a Worker</h3>
+<p>In our codebase, a Node isn't just a function. To make them reliable and easy to debug, every Node follows a strict three-step lifecycle: <strong>Prepare</strong>, <strong>Execute</strong>, and <strong>Post</strong>.</p>
+<ol>
+<li><strong>Prepare (<code>prep</code>)</strong>: This is the &quot;setup&quot; phase. The worker looks at the tools they have and gets them ready. In our case, this often means taking the raw data and turning it into a prompt that an AI can understand.</li>
+<li><strong>Execute (<code>exec</code>)</strong>: This is the &quot;work&quot; phase. The worker performs the actual task. This is where the &quot;heavy lifting&quot; happens, such as calling an AI model to analyze code.</li>
+<li><strong>Post (<code>post</code>)</strong>: This is the &quot;handover&quot; phase. The worker cleans up their station and hands the finished product to the next person in the <a href="01_flow.html">Flow</a>.</li>
+</ol>
+<p>Here is how the <a href="04_analyze.html">Analyze</a> worker is structured in <code>nodes.py</code>:</p>
+<pre><code class="language-python">class Analyze(Node):
+    def prep(self, shared):
+        return load_prompt(&quot;identify-abstractions.md&quot;).format(...)
+
+    def exec(self, prompt):
+        return parse_yaml(call_llm(prompt))
+
+    def post(self, shared, prep_res, exec_res):
+        shared[&quot;abstractions&quot;] = exec_res[&quot;abstractions&quot;]
+</code></pre>
+<h3>Why This Matters</h3>
+<p>By breaking the work into Nodes, we gain two massive advantages:</p>
+<ul>
+<li><strong>Isolation</strong>: If the <code>Analyze</code> node fails because the AI returned bad text, the error happens <em>inside</em> that node. We know exactly which &quot;worker&quot; failed, and we can tell the <a href="01_flow.html">Flow</a> to simply ask that worker to try again.</li>
+<li><strong>Reusability</strong>: Once you have a worker that can &quot;Identify Abstractions,&quot; you can use that same worker in a different <a href="01_flow.html">Flow</a> without rewriting a single line of code.</li>
+</ul>
+<p>This modularity allows us to build complex pipelines like the Codebase Knowledge Builder by simply connecting these specialized experts together.</p>
+<p>Now that you understand the individual workers, let's see our first worker in action. In the next chapter, we will dive into <a href="03_smartcrawl.html">SmartCrawl</a>, the node responsible for deciding which files are actually worth reading.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="01_flow.html">&larr; Flow</a></span>
+    <span><a href="03_smartcrawl.html">SmartCrawl &rarr;</a></span>
+  </nav>
+</body>
+</html>
