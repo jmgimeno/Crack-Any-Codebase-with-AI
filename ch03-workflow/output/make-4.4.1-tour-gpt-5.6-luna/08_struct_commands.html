@@ -1,0 +1,887 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>struct commands — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 8: struct commands</h1>
+<p>What happens when Make reads this target?</p>
+<pre><code class="language-make">app: main.o
+	@echo Building $@
+	$(CC) -o $@ $^
+</code></pre>
+<p>The recipe looks like two command lines, but Make cannot execute it immediately. It must remember:</p>
+<ul>
+<li>where the recipe came from;</li>
+<li>the complete recipe text;</li>
+<li>which character introduces recipe lines;</li>
+<li>whether each line is silent;</li>
+<li>whether errors should be ignored;</li>
+<li>whether a line invokes another Make;</li>
+<li>and how to split the text into executable commands later.</li>
+</ul>
+<p>That information is stored in <code>struct commands</code>.</p>
+<blockquote>
+<p><strong>Description:</strong> A <code>struct commands</code> stores the recipe text associated with a target, its source location, recipe prefix, and per-line flags such as silent, ignore-error, or recursive. It is the build instruction sheet attached to a target, later split into executable command lines and expanded with variables.</p>
+</blockquote>
+<p>The target itself is represented by <code>struct file</code>, described in <a href="04_struct_file.html">struct file</a>. Its <code>cmds</code> field points to this recipe record:</p>
+<pre><code class="language-text">struct file
+    |
+    +-- cmds --&gt; struct commands
+</code></pre>
+<p>The prerequisite links remain in <code>struct dep</code>, covered in <a href="05_struct_dep.html">struct dep</a>. The recipe is the part that eventually turns a ready target into a shell process.</p>
+<h2>Where the structure is declared</h2>
+<p>The definition is in <a href="../src/commands.h"><code>src/commands.h</code></a>:</p>
+<pre><code class="language-c">struct commands
+  {
+    floc fileinfo;
+    char *commands;
+    char **command_lines;
+    unsigned char *lines_flags;
+</code></pre>
+<p>The remaining fields are:</p>
+<pre><code class="language-c">    unsigned short ncommand_lines;
+    char recipe_prefix;
+    unsigned int any_recurse:1;
+  };
+</code></pre>
+<p>Each field has a distinct responsibility:</p>
+<ul>
+<li><code>fileinfo</code>: source filename and line information;</li>
+<li><code>commands</code>: the original recipe text;</li>
+<li><code>command_lines</code>: the recipe split into logical lines;</li>
+<li><code>lines_flags</code>: flags associated with each logical line;</li>
+<li><code>ncommand_lines</code>: number of logical lines;</li>
+<li><code>recipe_prefix</code>: the character that introduced the recipe;</li>
+<li><code>any_recurse</code>: whether at least one line invokes a recursive Make.</li>
+</ul>
+<p>Think of the structure as an instruction sheet with two versions:</p>
+<pre><code class="language-text">original sheet:
+  one block of recipe text
+
+execution sheet:
+  one expanded command line at a time
+</code></pre>
+<p>Make keeps the original form because it is useful for diagnostics, printing the database, and delaying work until the target actually needs rebuilding.</p>
+<h2>Recipes are collected while parsing</h2>
+<p>The parser in <a href="../src/read.c"><code>src/read.c</code></a> reads makefiles one logical line at a time. When it sees a line beginning with the current recipe prefix, usually a tab, it treats that line as recipe text:</p>
+<pre><code class="language-c">if (line[0] == cmd_prefix)
+  {
+    if (no_targets)
+      continue;
+</code></pre>
+<p>If a target is currently being collected, the parser appends the line:</p>
+<pre><code class="language-c">memcpy (&amp;commands[commands_idx], line + 1,
+        linelen - 1);
+commands_idx += linelen - 1;
+commands[commands_idx++] = '\n';
+</code></pre>
+<p>The leading tab is not stored. It tells the parser that the line is a recipe; the shell should receive the text after that prefix.</p>
+<p>For example:</p>
+<pre><code class="language-make">app:
+	echo hello
+</code></pre>
+<p>is stored conceptually as:</p>
+<pre><code class="language-text">echo hello\n
+</code></pre>
+<p>not:</p>
+<pre><code class="language-text">\t echo hello\n
+</code></pre>
+<p>The parser accumulates recipe lines in a temporary buffer. It does not allocate a <code>struct commands</code> for every line. It waits until the complete rule is known.</p>
+<h2>The recipe prefix</h2>
+<p>The normal recipe prefix is a tab:</p>
+<pre><code class="language-c">char cmd_prefix = '\t';
+</code></pre>
+<p>The special variable <code>.RECIPEPREFIX</code> can change it:</p>
+<pre><code class="language-make">.RECIPEPREFIX = &gt;
+app:
+&gt;echo hello
+</code></pre>
+<p>When <code>.RECIPEPREFIX</code> is assigned, <code>set_special_var()</code> updates the global prefix:</p>
+<pre><code class="language-c">else if (streq (var-&gt;name, RECIPEPREFIX_NAME))
+  {
+    cmd_prefix = var-&gt;value[0] == '\0'
+                 ? RECIPEPREFIX_DEFAULT : var-&gt;value[0];
+  }
+</code></pre>
+<p>The parser uses the current value when reading subsequent rules.</p>
+<p>When Make stores a recipe, it records the prefix that was active at that point:</p>
+<pre><code class="language-c">cmds-&gt;recipe_prefix = prefix;
+</code></pre>
+<p>This matters because <code>.RECIPEPREFIX</code> can change later. The recipe must still remember how it was written.</p>
+<p>The analogy is a form printed with a particular margin marker. Even if the office changes its preferred marker tomorrow, the old form retains the marker that explains its layout.</p>
+<h2>Creating <code>struct commands</code></h2>
+<p>Once the parser reaches the next rule, a variable assignment, an include directive, or the end of the file, it calls <code>record_files()</code>.</p>
+<p>If recipe text was collected, <code>record_files()</code> creates the command record:</p>
+<pre><code class="language-c">cmds = xmalloc (sizeof (struct commands));
+cmds-&gt;fileinfo.filenm = flocp-&gt;filenm;
+cmds-&gt;fileinfo.lineno = cmds_started;
+</code></pre>
+<p>It stores the remaining metadata:</p>
+<pre><code class="language-c">cmds-&gt;fileinfo.offset = 0;
+cmds-&gt;commands = xstrndup (commands, commands_idx);
+cmds-&gt;command_lines = 0;
+cmds-&gt;recipe_prefix = prefix;
+</code></pre>
+<p>At this point:</p>
+<ul>
+<li><code>commands</code> contains the complete unexpanded recipe;</li>
+<li><code>command_lines</code> is still <code>NULL</code>;</li>
+<li><code>lines_flags</code> has not been allocated;</li>
+<li>variable references such as <code>$(CC)</code> remain untouched.</li>
+</ul>
+<p>The <code>struct commands</code> is then attached to the target’s <code>struct file</code>:</p>
+<pre><code class="language-c">if (cmds != 0)
+  f-&gt;cmds = cmds;
+</code></pre>
+<p>If another single-colon rule supplies a different recipe for the same target, Make warns about overriding the old recipe:</p>
+<pre><code class="language-text">warning: overriding recipe for target 'app'
+warning: ignoring old recipe for target 'app'
+</code></pre>
+<p>The target keeps one effective recipe pointer, although command records can be shared by pattern and suffix rules.</p>
+<h2>Source locations travel with recipes</h2>
+<p>The <code>fileinfo</code> member is a <code>floc</code>, the source-location structure used throughout Make:</p>
+<pre><code class="language-c">typedef struct
+  {
+    const char *filenm;
+    unsigned long lineno;
+    unsigned long offset;
+  } floc;
+</code></pre>
+<p>For a recipe read from:</p>
+<pre><code class="language-text">Makefile:12
+</code></pre>
+<p>the command record remembers that location.</p>
+<p>This supports diagnostics such as:</p>
+<pre><code class="language-text">Makefile:12: warning: overriding recipe for target 'app'
+</code></pre>
+<p>It also lets <code>job.c</code> report failures using the recipe’s source location:</p>
+<pre><code class="language-text">Makefile:12: *** [app] Error 1
+</code></pre>
+<p>For built-in recipes, <code>fileinfo.filenm</code> is <code>NULL</code>. Printing code identifies these as built-in commands:</p>
+<pre><code class="language-c">if (cmds-&gt;fileinfo.filenm == 0)
+  puts (_(&quot; (built-in):&quot;));
+</code></pre>
+<p>The location is like a return address written on an instruction sheet. If the instruction causes trouble, Make can tell you which document and line supplied it.</p>
+<h2>One block first, lines later</h2>
+<p>Why does Make store the recipe as one string before splitting it?</p>
+<p>Because the exact execution boundaries are not always obvious while parsing. A recipe may contain:</p>
+<pre><code class="language-make">app:
+	echo one \
+	     two
+	echo three
+</code></pre>
+<p>The backslash-newline joins the first two physical lines into one logical shell command.</p>
+<p>A recipe may also be affected by:</p>
+<ul>
+<li><code>.ONESHELL</code>;</li>
+<li>escaped newlines;</li>
+<li>shell-specific quoting;</li>
+<li>variable expansion;</li>
+<li>commands generated by <code>define</code>;</li>
+<li>and recipes inherited from pattern rules.</li>
+</ul>
+<p>Therefore, <code>struct commands</code> keeps the source text intact until Make knows how the recipe should be interpreted.</p>
+<p>This is similar to storing a paragraph before deciding where sentences end. The paragraph preserves the author’s original formatting; a later pass can identify the actual units needed by the reader.</p>
+<h2>Splitting with <code>chop_commands()</code></h2>
+<p>The recipe is split by:</p>
+<pre><code class="language-c">void
+chop_commands (struct commands *cmds)
+</code></pre>
+<p>The first guard prevents repeated work:</p>
+<pre><code class="language-c">if (!cmds || cmds-&gt;command_lines != NULL)
+  return;
+</code></pre>
+<p>If <code>.ONESHELL</code> is active, all recipe text becomes one command line:</p>
+<pre><code class="language-c">if (one_shell)
+  {
+    size_t l = strlen (cmds-&gt;commands);
+    nlines = 1;
+</code></pre>
+<p>Make copies the complete recipe:</p>
+<pre><code class="language-c">lines = xmalloc (nlines * sizeof (char *));
+lines[0] = xstrdup (cmds-&gt;commands);
+</code></pre>
+<p>It then removes the final newline. The shell receives one script rather than one process per recipe line.</p>
+<p>Without <code>.ONESHELL</code>, <code>chop_commands()</code> searches for unescaped newlines:</p>
+<pre><code class="language-c">const char *p = cmds-&gt;commands;
+while (*p != '\0')
+  {
+    const char *end = strchr (p, '\n');
+</code></pre>
+<p>If the newline is escaped, it continues scanning:</p>
+<pre><code class="language-c">else if (end &gt; p &amp;&amp; end[-1] == '\\')
+  {
+    ++end;
+    goto find_end;
+  }
+</code></pre>
+<p>Each logical line is copied into <code>command_lines</code>:</p>
+<pre><code class="language-c">lines[nlines++] = xstrndup (p, end - p);
+</code></pre>
+<p>The result for:</p>
+<pre><code class="language-make">app:
+	echo one \
+	     two
+	echo three
+</code></pre>
+<p>is conceptually:</p>
+<pre><code class="language-text">command_lines[0] = &quot;echo one \\\n     two&quot;
+command_lines[1] = &quot;echo three&quot;
+</code></pre>
+<p>The first recipe line still contains the escaped newline. Later command construction decides how to pass it to the shell.</p>
+<h2>The line flags</h2>
+<p>After splitting, <code>chop_commands()</code> allocates one flag byte for each logical line:</p>
+<pre><code class="language-c">cmds-&gt;ncommand_lines = nlines;
+cmds-&gt;command_lines = lines;
+cmds-&gt;any_recurse = 0;
+cmds-&gt;lines_flags = xmalloc (nlines);
+</code></pre>
+<p>The flags are declared in <a href="../src/commands.h"><code>src/commands.h</code></a>:</p>
+<pre><code class="language-c">#define COMMANDS_RECURSE  1
+#define COMMANDS_SILENT   2
+#define COMMANDS_NOERROR  4
+</code></pre>
+<p>They represent:</p>
+<ul>
+<li><code>COMMANDS_RECURSE</code>: invoke another Make or explicitly marked recursive command;</li>
+<li><code>COMMANDS_SILENT</code>: do not echo this line;</li>
+<li><code>COMMANDS_NOERROR</code>: ignore an error from this line.</li>
+</ul>
+<p>The parser examines prefix characters at the start of each line:</p>
+<pre><code class="language-c">while (ISBLANK (*p) || *p == '-' || *p == '@' || *p == '+')
+  switch (*(p++))
+</code></pre>
+<p>An <code>@</code> sets silent mode:</p>
+<pre><code class="language-c">case '@':
+  flags |= COMMANDS_SILENT;
+  break;
+</code></pre>
+<p>A <code>-</code> sets ignore-error mode:</p>
+<pre><code class="language-c">case '-':
+  flags |= COMMANDS_NOERROR;
+  break;
+</code></pre>
+<p>A <code>+</code> marks the line as recursive:</p>
+<pre><code class="language-c">case '+':
+  flags |= COMMANDS_RECURSE;
+  break;
+</code></pre>
+<p>For this recipe:</p>
+<pre><code class="language-make">app:
+	@echo quiet
+	-rm temporary-file
+	+$(MAKE) helper
+</code></pre>
+<p>the flags are conceptually:</p>
+<pre><code class="language-text">line 0: COMMANDS_SILENT
+line 1: COMMANDS_NOERROR
+line 2: COMMANDS_RECURSE
+</code></pre>
+<p>The prefixes are instructions to Make, not necessarily text that should be passed to the shell.</p>
+<h2>Detecting recursive Make commands</h2>
+<p>A command can be recursive because it begins with <code>+</code>:</p>
+<pre><code class="language-make">	+$(MAKE) subdir
+</code></pre>
+<p>It can also be recognized through a reference to <code>$(MAKE)</code> or <code>${MAKE}</code>:</p>
+<pre><code class="language-c">if (!ANY_SET (flags, COMMANDS_RECURSE)
+    &amp;&amp; (strstr (p, &quot;$(MAKE)&quot;) != 0
+        || strstr (p, &quot;${MAKE}&quot;) != 0))
+  flags |= COMMANDS_RECURSE;
+</code></pre>
+<p>This matters for special modes such as <code>-n</code>.</p>
+<p>Normally, <code>-n</code> prints commands without running them. But recursive Make commands must still be allowed to run so the parent Make can delegate work to a child Make:</p>
+<pre><code class="language-make">subsystem:
+	$(MAKE) -C subdir
+</code></pre>
+<p>The recursive flag tells the job system that this command has special behavior.</p>
+<p>After processing all lines, <code>chop_commands()</code> summarizes the recipe:</p>
+<pre><code class="language-c">cmds-&gt;any_recurse |=
+  ANY_SET (flags, COMMANDS_RECURSE) ? 1 : 0;
+</code></pre>
+<p><code>any_recurse</code> is a quick answer to the question:</p>
+<pre><code class="language-text">Does any line in this recipe need recursive-command treatment?
+</code></pre>
+<p>It avoids repeatedly scanning every line when Make prepares a job.</p>
+<h2>Prefixes are interpreted again at execution time</h2>
+<p>The initial scan in <code>chop_commands()</code> identifies common flags early. But command expansion can reveal more prefix characters.</p>
+<p>For example:</p>
+<pre><code class="language-make">prefix = @
+app:
+	$(prefix)echo hello
+</code></pre>
+<p>The stored line does not visibly begin with <code>@</code> until variable expansion occurs.</p>
+<p>In <code>job.c</code>, <code>start_job_command()</code> combines the saved flags with the actual expanded command text:</p>
+<pre><code class="language-c">flags = (child-&gt;file-&gt;command_flags
+         | child-&gt;file-&gt;cmds-&gt;lines_flags[child-&gt;command_line - 1]);
+</code></pre>
+<p>It then scans the command beginning:</p>
+<pre><code class="language-c">while (*p != '\0')
+  {
+    if (*p == '@')
+      flags |= COMMANDS_SILENT;
+</code></pre>
+<p>It also recognizes <code>+</code> and <code>-</code> after expansion.</p>
+<p>This is a two-stage inspection:</p>
+<pre><code class="language-text">stored recipe text
+        ↓
+initial prefix scan
+        ↓
+variable expansion
+        ↓
+final prefix scan
+        ↓
+actual execution flags
+</code></pre>
+<p>The first stage supports early scheduling decisions. The second stage handles prefixes produced by variables.</p>
+<h2>Target-wide command flags</h2>
+<p>Per-line flags are not the only source of command behavior. A target can receive flags through special targets.</p>
+<p>For example:</p>
+<pre><code class="language-make">.SILENT: app
+.IGNORE: generated.txt
+</code></pre>
+<p>During <code>snap_deps()</code>, Make marks the corresponding <code>struct file</code> records:</p>
+<pre><code class="language-c">f2-&gt;command_flags |= COMMANDS_NOERROR;
+</code></pre>
+<p>or:</p>
+<pre><code class="language-c">f2-&gt;command_flags |= COMMANDS_SILENT;
+</code></pre>
+<p>These target-wide flags are combined with the individual line flags in <code>start_job_command()</code>.</p>
+<p>The distinction is:</p>
+<pre><code class="language-text">lines_flags:
+  behavior of one recipe line
+
+file-&gt;command_flags:
+  behavior of all lines for one target
+</code></pre>
+<p>This is like a workplace with both:</p>
+<ul>
+<li>a note attached to one task: “do not announce this task”;</li>
+<li>a policy attached to the whole project: “ignore failures for every task.”</li>
+</ul>
+<h2>Preparing a target for execution</h2>
+<p>The update engine calls <code>remake_file()</code> after deciding that a target needs rebuilding. If a recipe exists, it first ensures the command lines are ready:</p>
+<pre><code class="language-c">chop_commands (file-&gt;cmds);
+execute_file_commands (file);
+</code></pre>
+<p><code>execute_file_commands()</code> handles empty recipes specially:</p>
+<pre><code class="language-c">for (p = file-&gt;cmds-&gt;commands; *p != '\0'; ++p)
+  if (!ISSPACE (*p) &amp;&amp; *p != '-' &amp;&amp; *p != '@' &amp;&amp; *p != '+')
+    break;
+</code></pre>
+<p>If nothing meaningful remains, Make treats the recipe as successful without starting a shell:</p>
+<pre><code class="language-c">if (*p == '\0')
+  {
+    set_command_state (file, cs_running);
+    file-&gt;update_status = us_success;
+</code></pre>
+<p>Otherwise, it prepares target variables:</p>
+<pre><code class="language-c">initialize_file_variables (file, 0);
+set_file_variables (file, file-&gt;stem);
+</code></pre>
+<p>This creates automatic variables such as:</p>
+<ul>
+<li><code>$@</code>: target name;</li>
+<li><code>$&lt;</code>: first normal prerequisite;</li>
+<li><code>$^</code>: distinct normal prerequisites;</li>
+<li><code>$?</code>: prerequisites newer than the target;</li>
+<li><code>$|</code>: order-only prerequisites;</li>
+<li><code>$*</code>: pattern stem.</li>
+</ul>
+<p>The variable context comes from <a href="02_struct_variable.html">struct variable</a>, and the expansion engine comes from <a href="03_variable_expand.html">variable_expand</a>.</p>
+<h2>The <code>new_job()</code> handoff</h2>
+<p>After setting automatic variables, <code>execute_file_commands()</code> calls:</p>
+<pre><code class="language-c">new_job (file);
+</code></pre>
+<p>This transfers the prepared recipe to the job subsystem.</p>
+<p>The overall path is:</p>
+<pre class="mermaid">sequenceDiagram
+    participant Parser as Makefile parser
+    participant Commands as Command record
+    participant Target as Target context
+    participant Jobs as Job manager
+    participant Shell as Shell process
+
+    Parser->>Commands: Collect recipe text and source location
+    Commands->>Commands: Split logical lines and classify prefixes
+    Target->>Commands: Provide automatic variables and target flags
+    Commands->>Jobs: Expand command lines for the target
+    Jobs->>Shell: Start executable command
+    Shell-->>Jobs: Return completion status
+</pre>
+<p><code>new_job()</code> performs several important steps:</p>
+<ol>
+<li>calls <code>chop_commands()</code> if needed;</li>
+<li>allocates a <code>struct child</code>;</li>
+<li>expands every command line for the target;</li>
+<li>obtains the first command to run;</li>
+<li>waits for an available job slot;</li>
+<li>starts the command or places it on a waiting list.</li>
+</ol>
+<p>The <code>struct child</code> that tracks the running process is the subject of <a href="09_struct_child.html">struct child</a>.</p>
+<h2>Expansion occurs in <code>new_job()</code></h2>
+<p>The command lines stored in <code>struct commands</code> are still unexpanded. <code>new_job()</code> creates a separate expanded copy for the child:</p>
+<pre><code class="language-c">lines = xmalloc (cmds-&gt;ncommand_lines * sizeof (char *));
+for (i = 0; i &lt; cmds-&gt;ncommand_lines; ++i)
+  {
+    cmds-&gt;fileinfo.offset = i;
+</code></pre>
+<p>The final expansion call is:</p>
+<pre><code class="language-c">lines[i] = allocated_variable_expand_for_file
+  (cmds-&gt;command_lines[i], file);
+</code></pre>
+<p>The <code>file</code> argument is essential. It makes target-specific variables and automatic variables visible.</p>
+<p>For:</p>
+<pre><code class="language-make">CC = cc
+app: main.o
+	$(CC) -o $@ $^
+</code></pre>
+<p>the stored line is:</p>
+<pre><code class="language-text">$(CC) -o $@ $^
+</code></pre>
+<p>The expanded child line becomes something like:</p>
+<pre><code class="language-text">cc -o app main.o
+</code></pre>
+<p>The original line remains in <code>cmds-&gt;command_lines</code>. The expanded line belongs to the child job.</p>
+<p>This separation is like a reusable form template and a completed copy:</p>
+<pre><code class="language-text">template:
+  $(CC) -o $@ $^
+
+completed form:
+  cc -o app main.o
+</code></pre>
+<p>The same template can be used for another target with different automatic-variable values.</p>
+<h2>Backslash-newline cleanup inside references</h2>
+<p>Before final expansion, <code>new_job()</code> performs a small cleanup pass for backslash-newline sequences inside variable and function references.</p>
+<p>For example:</p>
+<pre><code class="language-make">app:
+	echo $(subst a, b, \
+	             value)
+</code></pre>
+<p>The parser preserves some formatting so that the recipe can be displayed attractively. But the function should not receive the newline and indentation as literal argument text.</p>
+<p>The cleanup code searches for dollar signs:</p>
+<pre><code class="language-c">while ((ref = strchr (in, '$')) != 0)
+  {
+    ++ref;
+</code></pre>
+<p>When it finds a reference, it counts parentheses and removes unescaped continuation sequences inside that reference. It replaces the continuation and following whitespace with one space.</p>
+<p>This gives Make two useful behaviors at once:</p>
+<ul>
+<li>command echoing can preserve readable line formatting;</li>
+<li>function and variable expansion can see normalized arguments.</li>
+</ul>
+<h2>Choosing a shell or direct execution</h2>
+<p>After expansion, <code>new_job()</code> asks the job layer to prepare a command:</p>
+<pre><code class="language-c">job_next_command (c);
+</code></pre>
+<p>Eventually, <code>start_job_command()</code> calls:</p>
+<pre><code class="language-c">argv = construct_command_argv
+  (p, &amp;end, child-&gt;file,
+   child-&gt;file-&gt;cmds-&gt;lines_flags[child-&gt;command_line - 1],
+   &amp;child-&gt;sh_batch_file);
+</code></pre>
+<p><code>construct_command_argv()</code> decides whether Make can execute the line directly or must invoke the shell.</p>
+<p>A simple command such as:</p>
+<pre><code class="language-text">cc -c main.c -o main.o
+</code></pre>
+<p>may be parsed directly into an argument vector.</p>
+<p>A shell-sensitive command such as:</p>
+<pre><code class="language-text">echo $HOME &gt; output
+</code></pre>
+<p>requires shell interpretation because it contains shell syntax.</p>
+<p>On Unix, the shell is normally:</p>
+<pre><code class="language-text">/bin/sh
+</code></pre>
+<p>On Windows, Make may use a batch file or a discovered shell executable. The command record does not need to know these platform details. It only supplies the recipe text and flags; <code>job.c</code> chooses the execution strategy.</p>
+<h2>Recursive commands and <code>-n</code></h2>
+<p>Suppose the user runs:</p>
+<pre><code class="language-sh">make -n
+</code></pre>
+<p>For an ordinary command, Make prints the expanded recipe and does not start a child.</p>
+<p>For a recursive command:</p>
+<pre><code class="language-make">subdir:
+	$(MAKE) -C subdir
+</code></pre>
+<p>the <code>COMMANDS_RECURSE</code> flag tells Make that this line is allowed to run even under print-only mode.</p>
+<p>In <code>start_job_command()</code>:</p>
+<pre><code class="language-c">if (argv != 0 &amp;&amp; question_flag
+    &amp;&amp; NONE_SET (flags, COMMANDS_RECURSE))
+</code></pre>
+<p>question mode reports that work is needed only for nonrecursive commands. Similar logic appears for <code>just_print_flag</code>.</p>
+<p>The reason is practical: a top-level Make must be able to coordinate sub-Makes. Treating every recursive invocation as mere text would prevent the child build from receiving the parent’s jobserver and variable environment.</p>
+<h2>Silent commands</h2>
+<p>A recipe line beginning with <code>@</code> is not echoed:</p>
+<pre><code class="language-make">app:
+	@echo Building app
+</code></pre>
+<p>The command still runs. Only Make’s own display is suppressed.</p>
+<p>In <code>start_job_command()</code>, Make decides whether to print:</p>
+<pre><code class="language-c">if (just_print_flag || ISDB (DB_PRINT)
+    || (NONE_SET (flags, COMMANDS_SILENT) &amp;&amp; !run_silent))
+  OS (message, 0, &quot;%s&quot;, p);
+</code></pre>
+<p>The command is printed when:</p>
+<ul>
+<li><code>-n</code> is active;</li>
+<li>database printing or command tracing requests it;</li>
+<li>and the command is not silent.</li>
+</ul>
+<p>A global <code>-s</code> or <code>.SILENT</code> affects <code>run_silent</code> or <code>command_flags</code>, while <code>@</code> affects only the relevant line.</p>
+<h2>Ignoring errors</h2>
+<p>A recipe line beginning with <code>-</code> tells Make to continue if that command fails:</p>
+<pre><code class="language-make">clean:
+	-rm generated-file
+</code></pre>
+<p>The line still executes. If the shell returns an error, the job layer marks it as ignored rather than failing the target.</p>
+<p>The per-line flag is copied into the child state:</p>
+<pre><code class="language-c">child-&gt;noerror = ANY_SET (flags, COMMANDS_NOERROR);
+</code></pre>
+<p>When the child exits, <code>reap_children()</code> checks:</p>
+<pre><code class="language-c">if (child_failed &amp;&amp; !c-&gt;noerror
+    &amp;&amp; !ignore_errors_flag)
+</code></pre>
+<p>If <code>c-&gt;noerror</code> is true, Make reports the failure as ignored and continues.</p>
+<p>This is like a checklist item labeled “best effort.” The worker should try it, but failure does not cancel the rest of the project.</p>
+<h2>The command environment</h2>
+<p>Before launching a real child process, Make constructs its environment:</p>
+<pre><code class="language-c">child-&gt;environment = target_environment
+  (child-&gt;file, child-&gt;file-&gt;cmds-&gt;any_recurse);
+</code></pre>
+<p><code>target_environment()</code> walks the target’s variable sets and exports the variables selected by their export policies.</p>
+<p>The resulting environment includes values such as:</p>
+<pre><code class="language-text">CC=cc
+MAKEFLAGS=-j4
+MAKELEVEL=1
+</code></pre>
+<p>The environment may differ between an ordinary recipe and a recursive Make recipe. Recursive commands need jobserver information and Make-specific variables so that the child can coordinate correctly.</p>
+<p>The variable records and export rules are explained in <a href="02_struct_variable.html">struct variable</a>. The command record simply provides the target context in which those variables should be expanded.</p>
+<h2>Commands can be shared</h2>
+<p>A <code>struct commands</code> may be referenced from several places:</p>
+<ul>
+<li>one explicit target;</li>
+<li>several targets listed on one rule;</li>
+<li>a pattern rule;</li>
+<li>converted suffix rules;</li>
+<li>a default recipe;</li>
+<li>grouped outputs.</li>
+</ul>
+<p>For example:</p>
+<pre><code class="language-make">one two:
+	echo building both
+</code></pre>
+<p>Both file records may point to the same command record:</p>
+<pre><code class="language-text">one-&gt;cmds --+
+            +--&gt; struct commands
+two-&gt;cmds --+
+</code></pre>
+<p>This is safe because the original recipe text is shared and read-only during execution. Per-target expansion happens later and produces separate strings for each <code>struct child</code>.</p>
+<p>Pattern rules use the same idea. A <code>struct rule</code> stores a reusable <code>cmds</code> pointer, as described in <a href="06_struct_rule.html">struct rule</a>. When a concrete target is selected, its <code>struct file</code> points at the shared recipe.</p>
+<p>The template is shared; the expanded command lines are target-specific.</p>
+<h2>Grouped and peer targets</h2>
+<p>A grouped rule can produce several targets:</p>
+<pre><code class="language-make">program program.map &amp;: main.o
+	ld -o program main.o
+</code></pre>
+<p>The target records are connected through <code>also_make</code>, described in <a href="04_struct_file.html">struct file</a>. They may share the same command record.</p>
+<p>When the recipe finishes, <code>notice_finished_file()</code> propagates state to peer targets:</p>
+<pre><code class="language-c">for (d = file-&gt;also_make; d != 0; d = d-&gt;next)
+  {
+    d-&gt;file-&gt;command_state = cs_finished;
+    d-&gt;file-&gt;updated = 1;
+</code></pre>
+<p>The peers receive the same update status:</p>
+<pre><code class="language-c">d-&gt;file-&gt;update_status = file-&gt;update_status;
+</code></pre>
+<p>This prevents Make from trying to run the same grouped recipe again merely because another output was reached through a different dependency path.</p>
+<h2>The child owns expanded commands</h2>
+<p>The <code>struct commands</code> record owns the reusable recipe description. The <code>struct child</code> owns the expanded command lines for one execution.</p>
+<p>The child structure contains:</p>
+<pre><code class="language-c">struct child
+  {
+    struct child *next;
+    struct file *file;
+    char *sh_batch_file;
+    char **command_lines;
+</code></pre>
+<p>It also tracks which line is currently active:</p>
+<pre><code class="language-c">    char *command_ptr;
+    unsigned int command_line;
+    pid_t pid;
+</code></pre>
+<p>The ownership boundary is:</p>
+<pre><code class="language-text">struct commands:
+  source recipe and reusable line metadata
+
+struct child:
+  expanded lines and process state
+</code></pre>
+<p>When the child is freed, <code>free_child()</code> releases its expanded lines:</p>
+<pre><code class="language-c">if (child-&gt;command_lines != 0)
+  {
+    for (i = 0; i &lt; child-&gt;file-&gt;cmds-&gt;ncommand_lines; ++i)
+      free (child-&gt;command_lines[i]);
+    free (child-&gt;command_lines);
+  }
+</code></pre>
+<p>The original <code>struct commands</code> remains available for database printing or another target that shares it.</p>
+<h2>Advancing through command lines</h2>
+<p><code>job_next_command()</code> selects the next nonempty command:</p>
+<pre><code class="language-c">while (child-&gt;command_ptr == 0
+       || *child-&gt;command_ptr == '\0')
+  {
+    if (child-&gt;command_line
+        == child-&gt;file-&gt;cmds-&gt;ncommand_lines)
+</code></pre>
+<p>When all lines have been consumed, it returns zero:</p>
+<pre><code class="language-c">child-&gt;command_ptr = 0;
+return 0;
+</code></pre>
+<p>Otherwise, it points to the next expanded line:</p>
+<pre><code class="language-c">child-&gt;command_ptr =
+  child-&gt;command_lines[child-&gt;command_line++];
+return 1;
+</code></pre>
+<p>The job system may execute recipe lines one at a time, reaping the shell process for one line before starting the next. This is why a single target can have one <code>struct child</code> whose command pointer moves through several expanded lines.</p>
+<p>For <code>.ONESHELL</code>, there is only one logical command line, so the entire recipe is passed as one script.</p>
+<h2>Command completion</h2>
+<p>When the shell exits, <code>reap_children()</code> determines whether it succeeded:</p>
+<pre><code class="language-c">if (exit_sig == 0 &amp;&amp; exit_code == 0)
+  child_failed = MAKE_SUCCESS;
+else
+  child_failed = MAKE_FAILURE;
+</code></pre>
+<p>If more commands remain and the previous line succeeded, Make starts the next one:</p>
+<pre><code class="language-c">if (job_next_command (c))
+  {
+    start_job_command (c);
+    continue;
+  }
+</code></pre>
+<p>If no lines remain, the target receives a successful status:</p>
+<pre><code class="language-c">else
+  c-&gt;file-&gt;update_status = us_success;
+</code></pre>
+<p>Then Make calls:</p>
+<pre><code class="language-c">notice_finished_file (c-&gt;file);
+</code></pre>
+<p>This updates the target’s <code>struct file</code>, including:</p>
+<ul>
+<li><code>command_state</code>;</li>
+<li><code>updated</code>;</li>
+<li><code>update_status</code>;</li>
+<li>cached timestamps;</li>
+<li>grouped peer targets.</li>
+</ul>
+<p>The full execution path is:</p>
+<pre><code class="language-text">struct commands
+        ↓
+chop_commands
+        ↓
+target-specific expansion
+        ↓
+struct child
+        ↓
+shell or direct process
+        ↓
+reap_children
+        ↓
+notice_finished_file
+        ↓
+struct file marked complete
+</code></pre>
+<h2>Printing recipes with <code>make -p</code></h2>
+<p>The database printer calls:</p>
+<pre><code class="language-c">print_commands (f-&gt;cmds);
+</code></pre>
+<p>The function reports the source location:</p>
+<pre><code class="language-c">fputs (_(&quot;#  recipe to execute&quot;), stdout);
+
+if (cmds-&gt;fileinfo.filenm == 0)
+  puts (_(&quot; (built-in):&quot;));
+else
+  printf (_(&quot; (from '%s', line %lu):\n&quot;),
+          cmds-&gt;fileinfo.filenm,
+          cmds-&gt;fileinfo.lineno);
+</code></pre>
+<p>It then prints logical recipe lines, preserving escaped newlines:</p>
+<pre><code class="language-c">printf (&quot;%c%.*s\n&quot;, cmd_prefix,
+        (int) (end - s), s);
+</code></pre>
+<p>Use:</p>
+<pre><code class="language-sh">make -p
+</code></pre>
+<p>to inspect:</p>
+<ul>
+<li>where a recipe came from;</li>
+<li>which recipe prefix it uses;</li>
+<li>whether it is attached to a target;</li>
+<li>and the original unexpanded command text.</li>
+</ul>
+<p>Remember that <code>make -p</code> displays the template, not necessarily the final command after variables are expanded.</p>
+<p>For the expanded command, use:</p>
+<pre><code class="language-sh">make -n
+</code></pre>
+<p>or:</p>
+<pre><code class="language-sh">make --debug=j
+</code></pre>
+<p>The first shows what Make would print; the second provides job-level scheduling information.</p>
+<h2>A complete example</h2>
+<p>Consider:</p>
+<pre><code class="language-make">CC = cc
+CFLAGS = -O2
+
+app: main.o
+	@echo Linking $@
+	$(CC) $(CFLAGS) -o $@ $^
+</code></pre>
+<h3>During parsing</h3>
+<p>The parser collects:</p>
+<pre><code class="language-text">echo Linking $@
+$(CC) $(CFLAGS) -o $@ $^
+</code></pre>
+<p>It creates:</p>
+<pre><code class="language-text">cmds-&gt;commands
+cmds-&gt;fileinfo.filenm = &quot;Makefile&quot;
+cmds-&gt;fileinfo.lineno = recipe line
+cmds-&gt;recipe_prefix = '\t'
+cmds-&gt;command_lines = NULL
+</code></pre>
+<h3>During update</h3>
+<p><code>update_goal_chain()</code> determines that <code>app</code> needs rebuilding, as described in <a href="07_update_goal_chain.html">update_goal_chain</a>.</p>
+<p><code>remake_file()</code> calls:</p>
+<pre><code class="language-c">chop_commands (file-&gt;cmds);
+execute_file_commands (file);
+</code></pre>
+<p><code>chop_commands()</code> creates two logical lines and records:</p>
+<pre><code class="language-text">line 0: silent
+line 1: ordinary
+</code></pre>
+<h3>During expansion</h3>
+<p><code>execute_file_commands()</code> defines:</p>
+<pre><code class="language-text">@ = app
+^ = main.o
+</code></pre>
+<p><code>new_job()</code> expands the lines:</p>
+<pre><code class="language-text">echo Linking app
+cc -O2 -o app main.o
+</code></pre>
+<h3>During execution</h3>
+<p>The first line is printed only if Make’s output policy allows it:</p>
+<pre><code class="language-text">Linking app
+</code></pre>
+<p>The second line is printed and sent to the shell. After both succeed, <code>notice_finished_file()</code> marks <code>app</code> updated.</p>
+<h2>A compact mental model</h2>
+<p>Think of <code>struct commands</code> as a reusable instruction sheet with a preparation pipeline.</p>
+<h3>Original recipe</h3>
+<pre><code class="language-c">commands
+</code></pre>
+<p>The complete text exactly as Make collected it.</p>
+<h3>Source label</h3>
+<pre><code class="language-c">fileinfo
+</code></pre>
+<p>The makefile and line that supplied the recipe.</p>
+<h3>Line organization</h3>
+<pre><code class="language-c">command_lines
+ncommand_lines
+</code></pre>
+<p>The logical commands after handling escaped newlines and <code>.ONESHELL</code>.</p>
+<h3>Per-line instructions</h3>
+<pre><code class="language-c">lines_flags
+</code></pre>
+<p>Whether each line is:</p>
+<ul>
+<li>silent;</li>
+<li>ignore-error;</li>
+<li>recursive.</li>
+</ul>
+<h3>Recipe syntax</h3>
+<pre><code class="language-c">recipe_prefix
+</code></pre>
+<p>The character that introduced the recipe when it was read.</p>
+<h3>Fast summary</h3>
+<pre><code class="language-c">any_recurse
+</code></pre>
+<p>Whether any line needs recursive-command behavior.</p>
+<p>The lifecycle is:</p>
+<pre><code class="language-text">recipe text in makefile
+        ↓
+parser accumulates one text block
+        ↓
+struct commands records source and prefix
+        ↓
+chop_commands splits logical lines
+        ↓
+lines_flags classify prefixes
+        ↓
+target variables are installed
+        ↓
+each line is expanded
+        ↓
+struct child owns expanded lines
+        ↓
+shell or direct process runs them
+        ↓
+completion updates struct file
+</code></pre>
+<h2>Key takeaways</h2>
+<ul>
+<li><code>struct commands</code> is the recipe record attached to a target’s <code>struct file</code>.</li>
+<li><code>fileinfo</code> records where the recipe came from.</li>
+<li><code>commands</code> stores the original, unexpanded recipe as one text block.</li>
+<li><code>recipe_prefix</code> remembers the prefix active when the recipe was parsed.</li>
+<li><code>command_lines</code> is created later by <code>chop_commands()</code>.</li>
+<li><code>.ONESHELL</code> makes the complete recipe one logical command line.</li>
+<li>Otherwise, escaped newlines remain part of one logical line.</li>
+<li><code>lines_flags</code> stores per-line behavior.</li>
+<li><code>COMMANDS_SILENT</code> represents <code>@</code>.</li>
+<li><code>COMMANDS_NOERROR</code> represents <code>-</code>.</li>
+<li><code>COMMANDS_RECURSE</code> represents <code>+</code> or a reference to <code>$(MAKE)</code>.</li>
+<li><code>any_recurse</code> quickly records whether any line is recursive.</li>
+<li>Target-wide <code>.SILENT</code> and <code>.IGNORE</code> settings are stored separately in <code>file-&gt;command_flags</code>.</li>
+<li>Recipes are expanded only after Make has selected a concrete target.</li>
+<li><code>new_job()</code> creates expanded command lines for one execution.</li>
+<li>Target-specific and automatic variables are supplied through the target’s variable context.</li>
+<li>The original command record can be shared by several targets or pattern rules.</li>
+<li>A <code>struct child</code> owns the expanded lines and process state for one running job.</li>
+<li><code>start_job_command()</code> combines line flags, target flags, and flags revealed by expansion.</li>
+<li><code>reap_children()</code> advances through the recipe and reports failures or success.</li>
+<li><code>notice_finished_file()</code> transfers the result back to the target’s <code>struct file</code>.</li>
+<li><code>make -p</code> shows stored recipe text and source locations; <code>make -n</code> shows expanded commands.</li>
+</ul>
+<p>Now that you understand how Make stores recipe text, classifies command prefixes, expands target-specific commands, and hands them to the job system, the next question is how one running process is tracked from launch through completion. That is the subject of <a href="09_struct_child.html">struct child</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="07_update_goal_chain.html">&larr; update_goal_chain</a></span>
+    <span><a href="09_struct_child.html">struct child &rarr;</a></span>
+  </nav>
+</body>
+</html>

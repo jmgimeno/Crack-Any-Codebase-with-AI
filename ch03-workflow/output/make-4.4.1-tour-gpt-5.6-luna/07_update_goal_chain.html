@@ -1,0 +1,962 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>update_goal_chain — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 7: update_goal_chain</h1>
+<p>What happens after Make has read every makefile and collected all the targets?</p>
+<p>Suppose you run:</p>
+<pre><code class="language-sh">make all
+</code></pre>
+<p>Make now has a list containing <code>all</code>, but <code>all</code> is only the visible entrance to a much larger project:</p>
+<pre><code class="language-text">all
+ ├── app
+ │    ├── main.o
+ │    └── util.o
+ └── tests
+      └── test.o
+</code></pre>
+<p>Some files may be missing. Some may be older than their prerequisites. Some may be generated through implicit rules. Several branches may be safe to build in parallel, while others must wait.</p>
+<p>The function that coordinates this work is <code>update_goal_chain</code>.</p>
+<blockquote>
+<p><strong>Description:</strong> This is the high-level dependency-solving operation. Starting from requested goals, it recursively checks timestamps, updates prerequisites, detects cycles, chooses implicit rules, and schedules recipes. Think of it as a project manager walking a dependency tree, rebuilding only the branches whose outputs are missing or obsolete.</p>
+</blockquote>
+<h2>Where the function fits</h2>
+<p>The public declaration is in <a href="../src/dep.h"><code>src/dep.h</code></a>:</p>
+<pre><code class="language-c">enum update_status update_goal_chain (struct goaldep *goals);
+</code></pre>
+<p>Its implementation is in <a href="../src/remake.c"><code>src/remake.c</code></a>:</p>
+<pre><code class="language-c">enum update_status
+update_goal_chain (struct goaldep *goaldeps)
+{
+  unsigned long last_cmd_count = 0;
+</code></pre>
+<p><code>update_goal_chain()</code> is called twice from <code>main()</code>:</p>
+<ol>
+<li>First, to update makefiles that may have been generated or included.</li>
+<li>Later, to update the user’s requested goals.</li>
+</ol>
+<p>The first call follows the result of <a href="01_read_all_makefiles.html"><code>read_all_makefiles</code></a>. The second follows the <code>goals</code> chain built while parsing command-line targets.</p>
+<p>Conceptually:</p>
+<pre><code class="language-text">read makefiles
+     ↓
+possibly rebuild makefiles
+     ↓
+re-execute if their contents changed
+     ↓
+update requested goals
+     ↓
+run recipes or report that nothing is needed
+</code></pre>
+<p>This separation is important. A generated makefile can change the rules and variables used by the real build, so Make must finish that preparation before updating ordinary targets.</p>
+<h2>Goals are dependency-shaped records</h2>
+<p>The function accepts a chain of <code>struct goaldep</code> records. <code>struct goaldep</code> reuses the same fields as <a href="05_struct_dep.html"><code>struct dep</code></a>:</p>
+<pre><code class="language-c">struct goaldep
+  {
+    DEP (struct goaldep);
+    int error;
+    floc floc;
+  };
+</code></pre>
+<p>Each goal record points to a <code>struct file</code>:</p>
+<pre><code class="language-text">goaldep
+   |
+   +-- file --&gt; struct file for &quot;all&quot;
+</code></pre>
+<p>The <code>struct file</code> is the project card described in <a href="04_struct_file.html"><code>struct file</code></a>. It contains:</p>
+<ul>
+<li>the target name;</li>
+<li>its prerequisites;</li>
+<li>its recipe;</li>
+<li>its timestamp cache;</li>
+<li>its update state;</li>
+<li>its target-specific variables;</li>
+<li>and its implicit-rule information.</li>
+</ul>
+<p>The goal chain is therefore not a second build graph. It is a short list of starting points into the existing file database.</p>
+<p>For example:</p>
+<pre><code class="language-text">goal chain:
+  all -&gt; install
+
+file database:
+  all -&gt; app -&gt; main.o
+       -&gt; tests
+  install -&gt; app
+</code></pre>
+<p>The same <code>struct file</code> can be reached from several goals.</p>
+<h2>Why the chain is copied</h2>
+<p>The first operation inside <code>update_goal_chain()</code> is:</p>
+<pre><code class="language-c">struct dep *goals_orig = copy_dep_chain
+  ((struct dep *)goaldeps);
+struct dep *goals = goals_orig;
+</code></pre>
+<p>The function makes a private copy because it removes completed goals while scanning.</p>
+<p>Imagine a project manager with a clipboard of tasks. As each top-level task finishes, the manager crosses it off the working list. The original request list remains intact, but the temporary working list becomes shorter.</p>
+<p>The copied records still point to the same <code>struct file</code> objects. Only the dependency-shaped wrappers are duplicated:</p>
+<pre><code class="language-text">original goaldep --&gt; file &quot;all&quot;
+working dep      --&gt; file &quot;all&quot;
+</code></pre>
+<p>This distinction matters because the file record stores the shared state. If <code>all</code> is reached through two goals, both paths observe the same <code>updated</code>, <code>update_status</code>, and <code>command_state</code> fields.</p>
+<h2>The overall control loop</h2>
+<p>The central loop continues until the working goal list is empty:</p>
+<pre><code class="language-c">while (goals != 0)
+  {
+    struct dep *gu, *g, *lastgoal;
+
+    start_waiting_jobs ();
+    reap_children (last_cmd_count == command_count, 0);
+</code></pre>
+<p>There are three important actions here:</p>
+<ol>
+<li>Start jobs that were waiting for the load average to drop.</li>
+<li>Reap completed child processes.</li>
+<li>Walk the remaining goals and update them.</li>
+</ol>
+<p>The loop may need several passes. In a parallel build, a target can be waiting for prerequisites whose recipes are still running. Make returns to the goal chain after children finish and continues the work.</p>
+<p>This is like a construction manager who:</p>
+<ol>
+<li>assigns available crews;</li>
+<li>checks which crews have finished;</li>
+<li>updates the schedule;</li>
+<li>assigns newly unblocked tasks;</li>
+<li>repeats until every requested product is complete.</li>
+</ol>
+<h2>Fresh consideration passes</h2>
+<p>The static variable <code>considered</code> tracks a scan through the dependency graph:</p>
+<pre><code class="language-c">static unsigned int considered = 0;
+</code></pre>
+<p>At the beginning of <code>update_goal_chain()</code>:</p>
+<pre><code class="language-c">++considered;
+</code></pre>
+<p>Each <code>struct file</code> has a matching field:</p>
+<pre><code class="language-c">unsigned int considered;
+</code></pre>
+<p>When Make begins processing a file, it records the current pass number. If another path reaches the same file during that pass, Make can avoid walking the same subtree again.</p>
+<p>The check is in <code>update_file()</code>:</p>
+<pre><code class="language-c">if (f-&gt;considered == considered)
+  {
+    DBF (DB_VERBOSE, _(&quot;Pruning file '%s'.\n&quot;));
+    return f-&gt;command_state == cs_finished
+           ? f-&gt;update_status : us_success;
+  }
+</code></pre>
+<p>This is not the same as saying the target is permanently finished. It means only that this pass has already examined it and no relevant state change has occurred since then.</p>
+<p>The distinction is useful in parallel builds. A file may have been considered while one of its prerequisites was still running. Once that prerequisite finishes, Make resets the relevant state and allows another pass to revisit the file.</p>
+<h2>The goal-scanning loop</h2>
+<p>Inside the outer loop, Make walks each remaining goal:</p>
+<pre><code class="language-c">lastgoal = 0;
+gu = goals;
+
+while (gu != 0)
+  {
+    g = gu-&gt;shuf ? gu-&gt;shuf : gu;
+    goal_dep = g;
+</code></pre>
+<p>The <code>shuf</code> link comes from the dependency structure explained in <a href="05_struct_dep.html"><code>struct dep</code></a>. If prerequisite or goal shuffling is enabled, Make uses the alternate traversal order. Otherwise, it uses the ordinary chain.</p>
+<p><code>goal_dep</code> records the goal currently being processed. Error reporting for missing makefiles uses this pointer to identify the relevant goal record and source location.</p>
+<h2>Double-colon goals</h2>
+<p>A target can have multiple independent double-colon rules:</p>
+<pre><code class="language-make">report::
+	echo first
+
+report::
+	echo second
+</code></pre>
+<p>The file database represents these as several linked <code>struct file</code> records. <code>update_goal_chain()</code> iterates over them:</p>
+<pre><code class="language-c">for (file = g-&gt;file-&gt;double_colon
+       ? g-&gt;file-&gt;double_colon : g-&gt;file;
+     file != NULL;
+     file = file-&gt;prev)
+  {
+    enum update_status fail;
+</code></pre>
+<p>Each double-colon entry is updated independently. The goal is removed from the working chain only after all its entries have finished.</p>
+<p>This is like several independent work orders filed under the same product name. The project manager must complete every order before declaring the product finished.</p>
+<h2>Updating one file</h2>
+<p>The actual recursive work begins here:</p>
+<pre><code class="language-c">fail = update_file (file,
+                    rebuilding_makefiles ? 1 : 0);
+</code></pre>
+<p><code>update_file()</code> is a wrapper around <code>update_file_1()</code>.</p>
+<p>Its responsibilities include:</p>
+<ul>
+<li>pruning files already considered in the current pass;</li>
+<li>walking double-colon entries;</li>
+<li>freeing temporary allocation state;</li>
+<li>propagating failures;</li>
+<li>and calling <code>update_file_1()</code> for the detailed dependency logic.</li>
+</ul>
+<p>The recursive depth argument is used for diagnostics and implicit-rule searches. Debug output can indent messages according to this depth, making a dependency walk easier to read.</p>
+<p>The call graph looks like this:</p>
+<pre><code class="language-text">update_goal_chain
+       ↓
+  update_file
+       ↓
+ update_file_1
+       ↓
+    check_dep
+       ↓
+  update_file
+</code></pre>
+<p>This cycle is intentional. A target asks <code>check_dep()</code> to update a prerequisite, and that prerequisite may recursively update its own prerequisites.</p>
+<h2>The detailed decision process</h2>
+<p><code>update_file_1()</code> begins by checking whether the file has already been handled:</p>
+<pre><code class="language-c">if (file-&gt;updated)
+  {
+    if (file-&gt;update_status &gt; us_none)
+      return file-&gt;update_status;
+
+    return us_success;
+  }
+</code></pre>
+<p>Then it checks the command state:</p>
+<pre><code class="language-c">switch (file-&gt;command_state)
+  {
+  case cs_not_started:
+  case cs_deps_running:
+    break;
+  case cs_running:
+    return us_success;
+</code></pre>
+<p>The states come from <a href="04_struct_file.html"><code>struct file</code></a>:</p>
+<ul>
+<li><code>cs_not_started</code>: no recipe is running.</li>
+<li><code>cs_deps_running</code>: prerequisites are still being built.</li>
+<li><code>cs_running</code>: this target’s recipe is running.</li>
+<li><code>cs_finished</code>: the work is complete.</li>
+</ul>
+<p>The update status is separate:</p>
+<ul>
+<li><code>us_success</code>: the update succeeded or nothing needed to be done.</li>
+<li><code>us_none</code>: no final result has been recorded yet.</li>
+<li><code>us_question</code>: <code>-q</code> found work that would be needed.</li>
+<li><code>us_failed</code>: an update failed.</li>
+</ul>
+<p>The two fields are like two labels on a delivery order:</p>
+<pre><code class="language-text">progress: waiting / packing / shipped
+result:   not decided / successful / failed
+</code></pre>
+<h2>Marking a file as updating</h2>
+<p>Before descending into prerequisites, Make marks the file:</p>
+<pre><code class="language-c">start_updating (file);
+</code></pre>
+<p>The macro sets the <code>updating</code> bit on the root of a double-colon chain:</p>
+<pre><code class="language-c">#define start_updating(_f) \
+  (((_f)-&gt;double_colon ? (_f)-&gt;double_colon : (_f))-&gt;updating = 1)
+</code></pre>
+<p>When processing is complete, Make clears it:</p>
+<pre><code class="language-c">finish_updating (file);
+finish_updating (ofile);
+</code></pre>
+<p>This marker detects cycles in the concrete dependency graph.</p>
+<p>For example:</p>
+<pre><code class="language-make">a: b
+b: a
+</code></pre>
+<p>The walk looks like:</p>
+<pre><code class="language-text">update a
+  update b
+    update a again
+</code></pre>
+<p>When the second visit reaches <code>a</code>, <code>is_updating()</code> is true. Make reports:</p>
+<pre><code class="language-text">Circular a &lt;- b dependency dropped.
+</code></pre>
+<p>Then it removes the circular edge from the active dependency chain instead of recursing forever.</p>
+<p>This is like marking rooms while exploring a maze. If you enter a room that is already marked “currently exploring,” you have found a loop.</p>
+<h2>Reading the target timestamp</h2>
+<p>The target’s timestamp is fetched early:</p>
+<pre><code class="language-c">this_mtime = file_mtime (file);
+check_renamed (file);
+noexist = this_mtime == NONEXISTENT_MTIME;
+</code></pre>
+<p><code>file_mtime()</code> is the cached timestamp interface described in <a href="04_struct_file.html"><code>struct file</code></a>. It may:</p>
+<ul>
+<li>call <code>stat</code>;</li>
+<li>search VPATH;</li>
+<li>resolve archive members;</li>
+<li>update <code>last_mtime</code>;</li>
+<li>rename a file record when a VPATH result becomes authoritative.</li>
+</ul>
+<p>A missing target sets:</p>
+<pre><code class="language-c">must_make = noexist;
+</code></pre>
+<p>A nonexistent output is like an empty warehouse: regardless of the age of its inputs, Make needs to find a way to produce it.</p>
+<p>Make also checks grouped targets stored in <code>also_make</code>. If a peer output is missing, the primary target must be rebuilt too:</p>
+<pre><code class="language-c">for (ad = file-&gt;also_make; ad &amp;&amp; !noexist; ad = ad-&gt;next)
+  {
+    FILE_TIMESTAMP fmtime = file_mtime (ad-&gt;file);
+    noexist = fmtime == NONEXISTENT_MTIME;
+</code></pre>
+<p>This supports grouped and multi-output pattern rules described in <a href="06_struct_rule.html"><code>struct rule</code></a>.</p>
+<h2>Choosing an implicit rule</h2>
+<p>If a target has no recipe, Make tries the implicit-rule machinery:</p>
+<pre><code class="language-c">if (!file-&gt;phony &amp;&amp; file-&gt;cmds == 0
+    &amp;&amp; !file-&gt;tried_implicit)
+  {
+    try_implicit_rule (file, depth);
+    file-&gt;tried_implicit = 1;
+  }
+</code></pre>
+<p>This connects directly to <a href="06_struct_rule.html"><code>struct rule</code></a>.</p>
+<p>The search may:</p>
+<ul>
+<li>match a <code>%</code> pattern;</li>
+<li>calculate a stem;</li>
+<li>substitute that stem into prerequisite names;</li>
+<li>search VPATH;</li>
+<li>recursively search for rules to create missing intermediate files;</li>
+<li>attach the selected recipe to <code>file-&gt;cmds</code>;</li>
+<li>attach concrete prerequisites to <code>file-&gt;deps</code>.</li>
+</ul>
+<p>For example:</p>
+<pre><code class="language-make">%.o: %.c
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>When Make considers <code>main.o</code>, implicit search may produce:</p>
+<pre><code class="language-text">target: main.o
+stem:   main
+dep:    main.c
+recipe: $(CC) -c $&lt; -o $@
+</code></pre>
+<p>The rule is reusable. The <code>struct file</code> now contains the concrete choice for this target.</p>
+<p>If no implicit rule is found, Make may use <code>.DEFAULT</code>:</p>
+<pre><code class="language-c">if (file-&gt;cmds == 0 &amp;&amp; !file-&gt;is_target
+    &amp;&amp; default_file != 0 &amp;&amp; default_file-&gt;cmds != 0)
+  file-&gt;cmds = default_file-&gt;cmds;
+</code></pre>
+<p>If there is still no recipe, <code>remake_file()</code> later distinguishes between:</p>
+<ul>
+<li>a declared target that needs no actual file;</li>
+<li>a phony target;</li>
+<li>and an undeclared prerequisite that cannot be made.</li>
+</ul>
+<h2>Updating prerequisites first</h2>
+<p>After selecting a recipe, Make walks the target’s prerequisites:</p>
+<pre><code class="language-c">amake.file = file;
+amake.next = file-&gt;also_make;
+ad = &amp;amake;
+
+while (ad)
+  {
+    du = ad-&gt;file-&gt;deps;
+    ad = ad-&gt;next;
+</code></pre>
+<p>The <code>also_make</code> loop ensures that peer targets’ prerequisites are also considered. A grouped recipe may create several outputs, but all their dependency work must be complete before the recipe starts.</p>
+<p>If secondary expansion is enabled, Make expands deferred prerequisite records:</p>
+<pre><code class="language-c">if (second_expansion)
+  expand_deps (ad-&gt;file);
+</code></pre>
+<p><code>expand_deps()</code> is the mechanism described in <a href="05_struct_dep.html"><code>struct dep</code></a>. It activates the target’s variable context, sets automatic variables such as <code>$*</code>, expands saved prerequisite text, and replaces it with concrete dependency edges.</p>
+<p>This is why a prerequisite can depend on the target name:</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+main.o: $$($$@_DEPS)
+</code></pre>
+<p>The expression is not resolved until Make is actually updating <code>main.o</code>.</p>
+<h2>Order-only prerequisites</h2>
+<p>Each dependency edge may have <code>ignore_mtime</code> set. This flag comes from the pipe syntax:</p>
+<pre><code class="language-make">app: main.o | build
+</code></pre>
+<p>The update loop still visits <code>build</code>:</p>
+<pre><code class="language-c">new = check_dep (d-&gt;file, depth, this_mtime, &amp;maybe_make);
+</code></pre>
+<p>But it only lets ordinary prerequisites force the target to rebuild:</p>
+<pre><code class="language-c">if (!d-&gt;ignore_mtime)
+  must_make = maybe_make;
+</code></pre>
+<p>So <code>build</code> must be updated first, but a newer timestamp on <code>build</code> does not make <code>app</code> obsolete.</p>
+<p>This is a useful distinction between two questions:</p>
+<pre><code class="language-text">Must this prerequisite be ready?       Yes.
+Does its timestamp make me rebuild?   Not if it is order-only.
+</code></pre>
+<p>The same flag later affects automatic variables such as <code>$^</code>, <code>$?</code>, and <code>$|</code>, as explained in <a href="08_struct_commands.html"><code>struct commands</code></a>.</p>
+<h2><code>.WAIT</code> and scheduling barriers</h2>
+<p>The dependency record can also carry <code>wait_here</code>, set when the parser sees <code>.WAIT</code>:</p>
+<pre><code class="language-make">all: first second .WAIT third
+</code></pre>
+<p>During the dependency walk:</p>
+<pre><code class="language-c">if (d-&gt;wait_here &amp;&amp; running)
+  break;
+</code></pre>
+<p>If earlier prerequisites are still running, Make stops before crossing the wait point. It can return to the goal in a later pass after those jobs finish.</p>
+<p>This does not necessarily disable parallelism everywhere. It creates a barrier at one point in the dependency list.</p>
+<p>The same flag is inserted for some <code>.NOTPARALLEL</code> cases by <code>snap_deps()</code>. One scheduling mechanism is reused for both explicit and implicit barriers.</p>
+<h2>Checking dependency timestamps</h2>
+<p>For each prerequisite, Make records its original timestamp:</p>
+<pre><code class="language-c">mtime = file_mtime (d-&gt;file);
+check_renamed (d-&gt;file);
+</code></pre>
+<p>It then recursively updates the prerequisite:</p>
+<pre><code class="language-c">d-&gt;file-&gt;parent = file;
+maybe_make = must_make;
+
+new = check_dep (d-&gt;file, depth, this_mtime, &amp;maybe_make);
+</code></pre>
+<p><code>check_dep()</code> handles two broad cases:</p>
+<ul>
+<li>ordinary or phony prerequisites are fully updated;</li>
+<li>intermediate prerequisites may be inspected and rebuilt only when necessary.</li>
+</ul>
+<p>After the prerequisite update, Make checks whether it is now newer or still missing:</p>
+<pre><code class="language-c">if (!running)
+  d-&gt;changed = ((file_mtime (d-&gt;file) != mtime)
+                || (mtime == NONEXISTENT_MTIME));
+</code></pre>
+<p>The <code>changed</code> flag later contributes to <code>$?</code> and to the target’s rebuild decision.</p>
+<p>Then the target’s <code>must_make</code> value is updated:</p>
+<pre><code class="language-c">if (!d-&gt;ignore_mtime)
+  must_make = maybe_make;
+</code></pre>
+<p>The logic is recursive, but the rule is straightforward:</p>
+<pre><code class="language-text">A target must be rebuilt if:
+  - it does not exist;
+  - a normal prerequisite does not exist;
+  - a normal prerequisite changed;
+  - a normal prerequisite is newer;
+  - the target is phony;
+  - or always-make mode is active.
+</code></pre>
+<h2>Handling intermediate files</h2>
+<p>Implicit rule search can create a chain such as:</p>
+<pre><code class="language-text">program
+   ↓
+program.o
+   ↓
+program.c
+</code></pre>
+<p>Sometimes <code>program.o</code> is only a temporary intermediate file. Make does not always update such files during the first dependency scan, because it may not yet know whether the final target needs rebuilding.</p>
+<p>After determining that a target must be remade, <code>update_file_1()</code> makes a second pass over intermediate prerequisites:</p>
+<pre><code class="language-c">if (must_make || always_make_flag)
+  {
+    for (du = file-&gt;deps; du != 0; du = du-&gt;next)
+      {
+        d = du-&gt;shuf ? du-&gt;shuf : du;
+</code></pre>
+<p>It then recursively updates prerequisite files marked <code>intermediate</code>.</p>
+<p>This two-stage approach avoids unnecessary work. An intermediate file may be left untouched if the final target is already current.</p>
+<p>After the build, <a href="04_struct_file.html"><code>remove_intermediates</code></a> may delete temporary files unless they are protected by <code>.PRECIOUS</code>, <code>.SECONDARY</code>, or <code>.NOTINTERMEDIATE</code>.</p>
+<h2>Deciding whether the target is stale</h2>
+<p>Once prerequisites have been processed, Make scans their timestamps again:</p>
+<pre><code class="language-c">deps_changed = 0;
+
+for (d = file-&gt;deps; d != 0; d = d-&gt;next)
+  {
+    FILE_TIMESTAMP d_mtime = file_mtime (d-&gt;file);
+    check_renamed (d-&gt;file);
+</code></pre>
+<p>Normal prerequisites contribute to <code>deps_changed</code>:</p>
+<pre><code class="language-c">if (!d-&gt;ignore_mtime)
+  deps_changed |= d-&gt;changed;
+</code></pre>
+<p>Make also marks a dependency as changed when the target itself did not exist or when the dependency is newer:</p>
+<pre><code class="language-c">d-&gt;changed |= noexist || d_mtime &gt; this_mtime;
+</code></pre>
+<p>Then several special cases are handled:</p>
+<ul>
+<li>a double-colon target with no prerequisites is always made;</li>
+<li>a target with no recipe and no changed prerequisites may not need rebuilding;</li>
+<li><code>always_make_flag</code> forces recipes to run.</li>
+</ul>
+<p>The final decision is:</p>
+<pre><code class="language-c">if (!must_make)
+  {
+    notice_finished_file (file);
+    return us_success;
+  }
+</code></pre>
+<p>If no recipe is needed, <code>notice_finished_file()</code> marks the target complete without starting a child process.</p>
+<h2>Starting a recipe</h2>
+<p>When a target must be remade, Make calls:</p>
+<pre><code class="language-c">remake_file (file);
+</code></pre>
+<p>If the target has no recipe, <code>remake_file()</code> reports an appropriate failure or treats a declared target as successfully considered.</p>
+<p>If a recipe exists, it prepares the command record:</p>
+<pre><code class="language-c">chop_commands (file-&gt;cmds);
+execute_file_commands (file);
+</code></pre>
+<p>The details of <code>struct commands</code> come in <a href="08_struct_commands.html">struct commands</a>, but the important sequence is:</p>
+<ol>
+<li>Split recipe text into logical lines.</li>
+<li>Initialize target-specific variables.</li>
+<li>Define automatic variables such as <code>$@</code>, <code>$&lt;</code>, <code>$^</code>, and <code>$?</code>.</li>
+<li>Expand each command for this target.</li>
+<li>Hand the command to the job subsystem.</li>
+</ol>
+<p>The automatic-variable setup happens in <code>execute_file_commands()</code>:</p>
+<pre><code class="language-c">initialize_file_variables (file, 0);
+set_file_variables (file, file-&gt;stem);
+new_job (file);
+</code></pre>
+<p>The target-specific variable chain comes from <a href="02_struct_variable.html"><code>struct variable</code></a>. Recipe expansion uses <a href="03_variable_expand.html"><code>variable_expand</code></a>.</p>
+<h2>Running jobs and returning later</h2>
+<p><code>new_job()</code> may start a child immediately, place it on a waiting list, or wait for a job slot.</p>
+<p>The job subsystem tracks each running process with a <code>struct child</code>, covered in <a href="09_struct_child.html">struct child</a>.</p>
+<p>A target whose prerequisites or recipe are still running receives an intermediate status:</p>
+<pre><code class="language-c">if (running)
+  {
+    set_command_state (file, cs_deps_running);
+    return us_success;
+  }
+</code></pre>
+<p>Returning <code>us_success</code> here does not necessarily mean the final recipe has completed. It means no failure has been recorded yet and Make should continue the broader scheduling loop.</p>
+<p>Later, <code>reap_children()</code> notices that a child has exited. It calls <code>notice_finished_file()</code>, which:</p>
+<ul>
+<li>marks the target finished;</li>
+<li>stores the update status;</li>
+<li>refreshes the timestamp cache;</li>
+<li>propagates state to grouped peer targets;</li>
+<li>and allows dependent targets to continue.</li>
+</ul>
+<p>The project manager analogy is especially useful here: assigning a task is not the same as completing it. Make records the assignment, continues with other work, and later processes the completion report.</p>
+<h2>Status propagation</h2>
+<p>After <code>update_file()</code> returns, <code>update_goal_chain()</code> examines the result:</p>
+<pre><code class="language-c">if ((fail || file-&gt;updated) &amp;&amp; status &lt; us_question)
+  {
+    if (file-&gt;update_status)
+      status = file-&gt;update_status;
+</code></pre>
+<p>The target’s <code>update_status</code> is authoritative when it is nonzero.</p>
+<p>Possible outcomes include:</p>
+<pre><code class="language-text">us_success   all requested work succeeded or was unnecessary
+us_question  -q found work that would be needed
+us_failed    a recipe or dependency failed
+us_none      nothing produced a final result yet
+</code></pre>
+<p>The function keeps the highest-severity result encountered. This allows the caller in <code>main()</code> to choose the final process exit status:</p>
+<pre><code class="language-c">switch (update_goal_chain (goals))
+  {
+  case us_none:
+  case us_success:
+    break;
+  case us_question:
+    makefile_status = MAKE_TROUBLE;
+    break;
+  case us_failed:
+    makefile_status = MAKE_FAILURE;
+    break;
+  }
+</code></pre>
+<p>The shell-level result is therefore translated from Make’s internal update status:</p>
+<pre><code class="language-text">us_success  → exit 0
+us_question → exit 1
+us_failed   → exit 2
+</code></pre>
+<h2>Removing completed goals</h2>
+<p>A goal is removed from the working chain when:</p>
+<ul>
+<li>its update has finished;</li>
+<li>all double-colon entries are complete;</li>
+<li>or Make is instructed to stop at a successfully rebuilt makefile.</li>
+</ul>
+<p>The removal logic is:</p>
+<pre><code class="language-c">if (stop || !any_not_updated)
+  {
+    if (lastgoal == 0)
+      goals = gu-&gt;next;
+    else
+      lastgoal-&gt;next = gu-&gt;next;
+</code></pre>
+<p><code>lastgoal</code> tracks the previous goal in the linked list. Removing a node does not alter the file database; it only removes that starting point from the current work queue.</p>
+<p>If there is nothing to remove, the function advances:</p>
+<pre><code class="language-c">else
+  {
+    lastgoal = gu;
+    gu = gu-&gt;next;
+  }
+</code></pre>
+<p>When the scan reaches the end of the list, <code>considered</code> is incremented so the next pass can distinguish new work from the previous pass.</p>
+<h2>The special makefile-rebuild mode</h2>
+<p>The same <code>update_goal_chain()</code> function updates both ordinary goals and makefiles. The global variable is set by <code>main()</code>:</p>
+<pre><code class="language-c">rebuilding_makefiles = 1;
+status = update_goal_chain (read_files);
+rebuilding_makefiles = 0;
+</code></pre>
+<p>The function saves the normal values of three command-line modes:</p>
+<pre><code class="language-c">int t = touch_flag, q = question_flag, n = just_print_flag;
+</code></pre>
+<p>While rebuilding makefiles, these modes are normally disabled for makefiles that were not explicitly requested as command-line goals:</p>
+<pre><code class="language-c">if (file-&gt;cmd_target)
+  {
+    touch_flag = t;
+    question_flag = q;
+    just_print_flag = n;
+  }
+else
+  touch_flag = question_flag = just_print_flag = 0;
+</code></pre>
+<p>Why?</p>
+<p>Imagine that <code>-n</code> means “show me what the project would do,” but Make needs to generate a makefile before it can understand the project. If Make merely printed the makefile-generation command and then re-executed, it could enter an endless restart loop without ever creating the file.</p>
+<p>The same concern applies to:</p>
+<ul>
+<li><code>-t</code>, which touches instead of running recipes;</li>
+<li><code>-q</code>, which asks whether work is needed;</li>
+<li>and <code>-n</code>, which only prints commands.</li>
+</ul>
+<p>The special makefile mode makes sure generated makefiles can actually be prepared when necessary.</p>
+<h2>Stopping after a rebuilt default makefile</h2>
+<p>When Make starts with no default makefile, <a href="01_read_all_makefiles.html"><code>read_all_makefiles</code></a> records several candidates:</p>
+<pre><code class="language-text">GNUmakefile
+makefile
+Makefile
+</code></pre>
+<p>Each candidate has <code>RM_DONTCARE</code>. During the update, if one is successfully created, <code>update_goal_chain()</code> marks the goal as finished and sets <code>stop</code>:</p>
+<pre><code class="language-c">if (rebuilding_makefiles &amp;&amp; file-&gt;dontcare)
+  stop = 1;
+</code></pre>
+<p>This prevents Make from trying to rebuild every possible default name. Once one candidate exists, Make stops and <code>main()</code> re-executes so the new makefile can be read.</p>
+<p>This is like searching for a primary manual in priority order. Once the first usable manual has been generated, there is no reason to generate all the alternatives.</p>
+<h2>The makefile restart decision</h2>
+<p><code>update_goal_chain()</code> itself returns a status. <code>main()</code> compares makefile timestamps before and after the update:</p>
+<pre><code class="language-c">if (file-&gt;updated)
+  {
+    if (file-&gt;update_status == us_success)
+      any_remade |= (file_mtime_no_search (d-&gt;file)
+                     != makefile_mtimes[i]);
+  }
+</code></pre>
+<p>If a makefile changed, control reaches the restart path:</p>
+<pre><code class="language-c">case us_success:
+re_exec:
+  remove_intermediates (0);
+</code></pre>
+<p>Make then reconstructs its argument list and executes itself again. The second process reads the changed makefile through <a href="01_read_all_makefiles.html"><code>read_all_makefiles</code></a>.</p>
+<p>This restart is why <code>update_goal_chain()</code> serves two kinds of projects:</p>
+<pre><code class="language-text">ordinary goals:
+  update targets and finish
+
+makefile goals:
+  update generated inputs, then restart the parser
+</code></pre>
+<h2>Parallel scheduling</h2>
+<p>The update engine does not directly fork processes. It asks the job subsystem to start work through <code>new_job()</code>.</p>
+<p>However, <code>update_goal_chain()</code> is responsible for repeatedly creating opportunities to run jobs:</p>
+<pre><code class="language-c">start_waiting_jobs ();
+reap_children (...);
+</code></pre>
+<p>The job subsystem uses:</p>
+<ul>
+<li>the jobserver for parallel slots;</li>
+<li>load-average limits;</li>
+<li>waiting jobs;</li>
+<li>child completion notifications;</li>
+<li>and output synchronization.</li>
+</ul>
+<p>The high-level relationship is:</p>
+<pre class="mermaid">sequenceDiagram
+    participant Goals as Goal chain
+    participant Update as Update engine
+    participant Files as File records
+    participant Jobs as Job system
+    participant Shell as Recipe process
+
+    Goals->>Update: Provide remaining top level work
+    Update->>Files: Check timestamps and dependencies
+    Files-->>Update: Report ready or obsolete state
+    Update->>Jobs: Schedule required recipes
+    Jobs->>Shell: Start available process
+    Shell-->>Jobs: Return completion status
+    Jobs-->>Update: Mark target finished
+    Update-->>Goals: Remove completed goal
+</pre>
+<p>The key idea is that dependency traversal and process scheduling are interleaved. Make does not first calculate an entire static schedule and then execute it. It walks as far as it can, starts available work, waits for completions, and resumes the walk.</p>
+<h2><code>-q</code>, <code>-n</code>, and <code>-t</code></h2>
+<p>Several command-line modes change what “update” means.</p>
+<h3>Question mode: <code>-q</code></h3>
+<p>With <code>-q</code>, Make should not run recipes. <code>start_job_command()</code> detects this:</p>
+<pre><code class="language-c">if (argv != 0 &amp;&amp; question_flag
+    &amp;&amp; NONE_SET (flags, COMMANDS_RECURSE))
+  {
+    child-&gt;file-&gt;update_status = us_question;
+    notice_finished_file (child-&gt;file);
+    return;
+  }
+</code></pre>
+<p>A nonempty recipe means the target would need work, so the target receives <code>us_question</code>.</p>
+<p><code>update_goal_chain()</code> stops early for ordinary goals when <code>-q</code> has established the answer:</p>
+<pre><code class="language-c">stop = (question_flag &amp;&amp; !keep_going_flag
+        &amp;&amp; !rebuilding_makefiles);
+</code></pre>
+<h3>Just-print mode: <code>-n</code></h3>
+<p>With <code>-n</code>, Make expands and prints recipes but does not execute ordinary commands. The job layer still increments <code>commands_started</code> when a command would have started.</p>
+<p>That matters because <code>update_goal_chain()</code> uses the command count to set the goal’s <code>changed</code> flag:</p>
+<pre><code class="language-c">if (commands_started &gt; ocommands_started)
+  g-&gt;changed = 1;
+</code></pre>
+<p>Make can therefore distinguish:</p>
+<pre><code class="language-text">nothing needed
+from
+a recipe would have run
+</code></pre>
+<p>even though no child process was created.</p>
+<h3>Touch mode: <code>-t</code></h3>
+<p>With <code>-t</code>, Make updates timestamps instead of running ordinary recipes. <code>notice_finished_file()</code> calls <code>touch_file()</code> when appropriate.</p>
+<p>Recursive make commands receive special handling so that a parent Make can still invoke a child Make when needed. This prevents <code>-t</code> from pretending that an entire recursive build happened merely because the top-level recipe was touched.</p>
+<h2>Error handling and <code>dontcare</code></h2>
+<p>Missing prerequisites and failed included makefiles do not all have the same severity.</p>
+<p>The <code>dontcare</code> flag is inherited during makefile rebuilding:</p>
+<pre><code class="language-c">dontcare = d-&gt;file-&gt;dontcare;
+d-&gt;file-&gt;dontcare = file-&gt;dontcare;
+</code></pre>
+<p>If a missing file is optional, Make may defer or suppress its diagnostic. If the file was required, <code>complain()</code> eventually reports:</p>
+<pre><code class="language-text">No rule to make target 'missing.h', needed by 'app'.
+</code></pre>
+<p>For included makefiles, <code>show_goal_error()</code> uses <code>goal_dep</code> and <code>goal_list</code> to report the original source location and error:</p>
+<pre><code class="language-c">if ((goal_dep-&gt;flags &amp; (RM_INCLUDED|RM_DONTCARE)) != RM_INCLUDED)
+  return;
+</code></pre>
+<p>This lets Make distinguish:</p>
+<pre><code class="language-text">optional generated include
+from
+required include
+from
+ordinary missing prerequisite
+</code></pre>
+<p>The flags on <code>struct goaldep</code>, introduced in <a href="05_struct_dep.html"><code>struct dep</code></a>, therefore influence both scheduling and diagnostics.</p>
+<h2>A complete example</h2>
+<p>Consider:</p>
+<pre><code class="language-make">app: main.o util.o | build
+	$(CC) -o $@ $^
+
+main.o: main.c
+util.o: util.c
+
+build:
+	mkdir -p build
+</code></pre>
+<p>Assume:</p>
+<ul>
+<li><code>app</code> does not exist;</li>
+<li><code>main.o</code> exists but is older than <code>main.c</code>;</li>
+<li><code>util.o</code> is current;</li>
+<li><code>build</code> does not exist.</li>
+</ul>
+<p>The update proceeds conceptually like this:</p>
+<ol>
+<li><code>update_goal_chain()</code> receives the goal <code>app</code>.</li>
+<li><code>update_file(app)</code> checks that <code>app</code> is missing.</li>
+<li>It visits <code>main.o</code>.</li>
+<li><code>main.o</code> is older than <code>main.c</code>, so its recipe is scheduled.</li>
+<li>It visits <code>util.o</code>.</li>
+<li><code>util.o</code> is already current.</li>
+<li>It visits <code>build</code>.</li>
+<li><code>build</code> is created because it is missing.</li>
+<li>Because <code>build</code> is order-only, its timestamp does not independently make <code>app</code> stale.</li>
+<li><code>main.o</code> changed, so <code>app</code> must be rebuilt.</li>
+<li>Make initializes <code>$@</code>, <code>$^</code>, and other automatic variables.</li>
+<li>Make expands and runs the link recipe.</li>
+<li>Child completion marks <code>app</code> finished.</li>
+<li>The goal is removed from the working chain.</li>
+<li><code>update_goal_chain()</code> returns <code>us_success</code>.</li>
+</ol>
+<p>The important observation is that Make did not rebuild every branch equally:</p>
+<pre><code class="language-text">main.o: rebuilt
+util.o: skipped
+build: created as a prerequisite
+app: rebuilt because main.o changed
+</code></pre>
+<p>That selective behavior is the purpose of the timestamp and state machinery.</p>
+<h2>A second example: a cycle</h2>
+<pre><code class="language-make">a: b
+b: c
+c: a
+</code></pre>
+<p>The walk is:</p>
+<pre><code class="language-text">update a
+  update b
+    update c
+      update a
+</code></pre>
+<p>When the final <code>update a</code> sees that <code>a</code> is already marked <code>updating</code>, Make drops the circular dependency and reports it.</p>
+<p>The function does not rely on recursion depth alone. A deep but valid dependency tree is allowed; the <code>updating</code> marker identifies a path that returns to an active ancestor.</p>
+<h2>A third example: implicit construction</h2>
+<pre><code class="language-make">app.o: app.c
+</code></pre>
+<p>If <code>app.o</code> has no recipe, Make may discover:</p>
+<pre><code class="language-make">%.o: %.c
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>The process becomes:</p>
+<pre><code class="language-text">update app.o
+     ↓
+try implicit rule
+     ↓
+match %.o
+     ↓
+stem = app
+     ↓
+prerequisite = app.c
+     ↓
+update app.c
+     ↓
+schedule compile recipe
+</code></pre>
+<p>The selected rule is attached to <code>app.o</code>’s <code>struct file</code>, while the reusable <code>struct rule</code> remains available for other object files.</p>
+<h2>Why update status starts at <code>us_none</code></h2>
+<p><code>us_none</code> does not mean failure. It means that the update has not yet produced a final result.</p>
+<p>For example, while prerequisites are running:</p>
+<pre><code class="language-text">update_status = us_none
+command_state = cs_deps_running
+</code></pre>
+<p>When the prerequisites finish and no recipe is needed, <code>notice_finished_file()</code> changes the status to <code>us_success</code>.</p>
+<p>When <code>-q</code> finds that a recipe would be required:</p>
+<pre><code class="language-text">update_status = us_question
+</code></pre>
+<p>When a child exits unsuccessfully:</p>
+<pre><code class="language-text">update_status = us_failed
+</code></pre>
+<p>Keeping “not finished yet” separate from “failed” is essential for parallel scheduling. Otherwise, Make could mistake a target waiting for a child for a target that has already failed.</p>
+<h2>Inspecting the update process</h2>
+<p>The most useful diagnostic options are:</p>
+<pre><code class="language-sh">make --debug=v
+</code></pre>
+<p>This shows verbose dependency decisions, including:</p>
+<ul>
+<li>when a target is considered;</li>
+<li>when a prerequisite is newer;</li>
+<li>when an implicit rule is searched;</li>
+<li>when a circular dependency is dropped;</li>
+<li>when a target is skipped;</li>
+<li>when a recipe starts or finishes.</li>
+</ul>
+<p>For more detail:</p>
+<pre><code class="language-sh">make --debug=a
+</code></pre>
+<p>This enables all available debug categories, including job and implicit-rule messages.</p>
+<p>The internal database is useful after the build:</p>
+<pre><code class="language-sh">make -p
+</code></pre>
+<p>Look at each file record for:</p>
+<ul>
+<li>cached modification time;</li>
+<li>update status;</li>
+<li>command state;</li>
+<li>selected implicit stem;</li>
+<li>prerequisites;</li>
+<li>intermediate and phony flags.</li>
+</ul>
+<p>To test parallel behavior:</p>
+<pre><code class="language-sh">make -j4 --debug=j
+</code></pre>
+<p>This exposes jobserver tokens, waiting jobs, child processes, and completion events.</p>
+<p>To test undeclared ordering dependencies:</p>
+<pre><code class="language-sh">make --shuffle=random
+</code></pre>
+<p>If the build fails only when prerequisites are shuffled, the makefile may rely accidentally on written order instead of declaring the true dependency.</p>
+<h2>The complete mental model</h2>
+<p>You can remember <code>update_goal_chain()</code> as a project manager using a live task board.</p>
+<h3>1. Start with top-level requests</h3>
+<pre><code class="language-text">all
+install
+test
+</code></pre>
+<p>These are <code>struct goaldep</code> records pointing into the file database.</p>
+<h3>2. Pick a goal still on the board</h3>
+<p>The working chain contains goals not yet finished.</p>
+<h3>3. Inspect the target card</h3>
+<p>Read:</p>
+<ul>
+<li>cached timestamp;</li>
+<li>recipe;</li>
+<li>prerequisites;</li>
+<li>special flags;</li>
+<li>current command state.</li>
+</ul>
+<h3>4. Choose a recipe if needed</h3>
+<p>If no explicit recipe exists, search the pattern-rule collection described in <a href="06_struct_rule.html"><code>struct rule</code></a>.</p>
+<h3>5. Visit prerequisites</h3>
+<p>For each <code>struct dep</code> edge:</p>
+<ul>
+<li>expand deferred names;</li>
+<li>detect cycles;</li>
+<li>update the prerequisite recursively;</li>
+<li>compare timestamps;</li>
+<li>honor order-only and <code>.WAIT</code> flags.</li>
+</ul>
+<h3>6. Schedule work</h3>
+<p>If the target is missing or obsolete, pass its recipe to the job subsystem described in <a href="09_struct_child.html">struct child</a>.</p>
+<h3>7. Wait and resume</h3>
+<p>Parallel jobs may still be running. Reap finished children, update file state, and revisit goals that were waiting.</p>
+<h3>8. Complete or report</h3>
+<p>Mark the file successful, questionable, or failed. Remove completed top-level goals from the working chain.</p>
+<p>The overall algorithm is:</p>
+<pre><code class="language-text">goal
+ ↓
+target timestamp
+ ↓
+implicit rule selection if necessary
+ ↓
+prerequisite expansion
+ ↓
+recursive prerequisite updates
+ ↓
+cycle and ordering checks
+ ↓
+timestamp comparison
+ ↓
+recipe scheduling
+ ↓
+child completion
+ ↓
+goal removal
+</code></pre>
+<h2>Key takeaways</h2>
+<ul>
+<li><code>update_goal_chain()</code> is the top-level coordinator for dependency solving.</li>
+<li>It is used both for rebuilding makefiles and for updating ordinary user goals.</li>
+<li>It copies the goal chain so completed goals can be removed safely.</li>
+<li><code>considered</code> prevents repeated graph walks during one scheduling pass.</li>
+<li><code>update_file()</code> and <code>update_file_1()</code> perform the recursive target update.</li>
+<li><code>file_mtime()</code> supplies cached timestamps and may perform VPATH searches.</li>
+<li>Missing targets normally need rebuilding.</li>
+<li>Prerequisites are updated before their target’s recipe is scheduled.</li>
+<li><code>ignore_mtime</code> implements order-only prerequisites.</li>
+<li><code>wait_here</code> implements <code>.WAIT</code> and related scheduling barriers.</li>
+<li><code>updating</code> detects circular dependencies.</li>
+<li><code>tried_implicit</code> prevents repeated implicit-rule searches.</li>
+<li>Pattern rules can be selected lazily when a concrete target needs a recipe.</li>
+<li>Intermediate prerequisites are reconsidered after Make knows the final target must be rebuilt.</li>
+<li><code>changed</code> contributes to timestamp decisions and automatic variable <code>$?</code>.</li>
+<li><code>command_state</code> tracks progress while <code>update_status</code> records the final outcome.</li>
+<li>Parallel builds repeatedly schedule available work and revisit goals after children finish.</li>
+<li><code>-q</code>, <code>-n</code>, and <code>-t</code> alter what it means to update a target.</li>
+<li>Makefile rebuilding temporarily changes those options to avoid restart loops.</li>
+<li>A changed makefile causes <code>main()</code> to re-execute Make and reread the build description.</li>
+<li>The final status becomes Make’s process exit code.</li>
+</ul>
+<p>Now that you understand how Make walks dependency edges, chooses recipes, and decides which targets need work, the next question is how recipe text is split, expanded, and turned into executable command lines. That is the subject of <a href="08_struct_commands.html">struct commands</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="06_struct_rule.html">&larr; struct rule</a></span>
+    <span><a href="08_struct_commands.html">struct commands &rarr;</a></span>
+  </nav>
+</body>
+</html>

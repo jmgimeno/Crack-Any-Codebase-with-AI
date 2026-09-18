@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>struct rule — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 6: struct rule</h1>
+<p>Suppose Make is asked to build <code>build/main.o</code>, but the makefile contains no explicit rule for that exact filename:</p>
+<pre><code class="language-make">build/main.o:
+</code></pre>
+<p>How can Make know that it should compile <code>src/main.c</code>? Where is the reusable recipe stored? How does Make compare several possible recipes and choose the best one?</p>
+<p>The answer is a pattern rule:</p>
+<pre><code class="language-make">%.o: %.c
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>GNU Make stores this reusable template in a <code>struct rule</code>.</p>
+<blockquote>
+<p><strong>Description:</strong> A rule describes how one or more targets can be produced from prerequisites and commands. Pattern rules use <code>%</code> to generalize over filenames, such as <code>%.o</code> from <code>%.c</code>. Think of a rule as a reusable recipe template that Make matches against a specific target when no explicit recipe is available.</p>
+</blockquote>
+<p>The previous chapter explained how <a href="05_struct_dep.html"><code>struct dep</code></a> stores individual prerequisite edges. This chapter explains how those edges, target patterns, and recipes are bundled into reusable implicit rules.</p>
+<h2>Where <code>struct rule</code> fits</h2>
+<p>The structure is declared in <a href="../src/rule.h"><code>src/rule.h</code></a>:</p>
+<pre><code class="language-c">struct rule
+  {
+    struct rule *next;
+    const char **targets;
+    unsigned int *lens;
+    const char **suffixes;
+</code></pre>
+<p>The remaining fields are:</p>
+<pre><code class="language-c">    struct dep *deps;
+    struct commands *cmds;
+    char *_defn;
+    unsigned short num;
+    char terminal;
+    char in_use;
+  };
+</code></pre>
+<p>A rule therefore contains:</p>
+<ul>
+<li>a link to the next rule;</li>
+<li>one or more target patterns;</li>
+<li>lengths of those patterns;</li>
+<li>pointers to the characters after each <code>%</code>;</li>
+<li>prerequisite records;</li>
+<li>a recipe;</li>
+<li>a printable cached definition;</li>
+<li>the number of target patterns;</li>
+<li>and state used while searching.</li>
+</ul>
+<p>A useful picture is a recipe card:</p>
+<pre><code class="language-text">Target pattern: %.o
+Prerequisites:  %.c
+Recipe:         $(CC) -c $&lt; -o $@
+</code></pre>
+<p>The card does not describe only <code>main.o</code>. It describes every object file that can match <code>%.o</code>.</p>
+<h2>The global pattern-rule chain</h2>
+<p>Pattern rules are stored in a global linked list:</p>
+<pre><code class="language-c">struct rule *pattern_rules;
+struct rule *last_pattern_rule;
+unsigned int num_pattern_rules;
+</code></pre>
+<p>The first pointer identifies the first rule. The second makes it efficient to append a new rule. The count records how many rules exist after Make finishes preparing the database.</p>
+<p>This is like a shelf of recipe cards:</p>
+<pre><code class="language-text">rule 1 -&gt; rule 2 -&gt; rule 3 -&gt; ...
+</code></pre>
+<p>When Make searches for a way to build a target, <a href="../src/implicit.c"><code>pattern_search</code></a> walks this collection and tests each candidate.</p>
+<p>The chain contains both:</p>
+<ul>
+<li>rules written by the user;</li>
+<li>rules installed by GNU Make’s built-in defaults.</li>
+</ul>
+<p>Built-in rules are installed later in startup, after makefiles have been read:</p>
+<pre><code class="language-c">install_default_implicit_rules ();
+</code></pre>
+<p>This ordering is deliberate. User-defined pattern rules must be able to take precedence over equivalent built-in rules.</p>
+<h2>How a makefile line becomes a rule</h2>
+<p>The parser in <a href="../src/read.c"><code>src/read.c</code></a> first collects:</p>
+<ul>
+<li>target names;</li>
+<li>prerequisite text;</li>
+<li>recipe text;</li>
+<li>whether the rule uses one or two colons;</li>
+<li>whether it is grouped;</li>
+<li>and whether a target pattern was present.</li>
+</ul>
+<p>Eventually it calls:</p>
+<pre><code class="language-c">record_files (filenames, also_make_targets, pattern,
+              pattern_percent, depstr, cmds_started,
+              commands, commands_idx, two_colon,
+              prefix, &amp;fi);
+</code></pre>
+<p>Inside <code>record_files()</code>, Make checks whether the first target contains <code>%</code>:</p>
+<pre><code class="language-c">name = filenames-&gt;name;
+implicit_percent = find_percent_cached (&amp;name);
+</code></pre>
+<p>If the target contains <code>%</code>, the parser treats the rule as an implicit pattern rule rather than an ordinary file rule.</p>
+<p>For example:</p>
+<pre><code class="language-make">%.o: %.c
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>is not attached directly to a <code>struct file</code> for <code>%.o</code>. It becomes a <code>struct rule</code> in the pattern-rule chain.</p>
+<h2>Creating the recipe record</h2>
+<p>Before creating the rule, <code>record_files()</code> packages the recipe into a <code>struct commands</code>:</p>
+<pre><code class="language-c">if (commands_idx &gt; 0)
+  {
+    cmds = xmalloc (sizeof (struct commands));
+    cmds-&gt;fileinfo.filenm = flocp-&gt;filenm;
+    cmds-&gt;fileinfo.lineno = cmds_started;
+</code></pre>
+<p>It then stores the recipe text:</p>
+<pre><code class="language-c">    cmds-&gt;commands = xstrndup (commands, commands_idx);
+    cmds-&gt;command_lines = 0;
+    cmds-&gt;recipe_prefix = prefix;
+  }
+</code></pre>
+<p>The recipe is not expanded here. Variables such as <code>$(CC)</code> and automatic variables such as <code>$@</code> must wait until Make has selected a concrete target.</p>
+<p>That is the same deferred-recipe idea described in <a href="04_struct_file.html">struct file</a> and <a href="08_struct_commands.html">struct commands</a>. A pattern rule stores a template; a later target-specific operation expands it.</p>
+<h2>Creating the prerequisite chain</h2>
+<p>The prerequisite text becomes a chain of <code>struct dep</code> records:</p>
+<pre><code class="language-c">deps = split_prereqs (depstr);
+free (depstr);
+</code></pre>
+<p>For an ordinary explicit rule, <code>enter_prereqs()</code> immediately connects each dependency to a <code>struct file</code>.</p>
+<p>Pattern rules are different. Make must not turn <code>%.c</code> into an actual file while reading the rule. The <code>%</code> has meaning only after a target is matched.</p>
+<p>That is why <code>record_files()</code> intentionally avoids entering prerequisites for an implicit rule:</p>
+<pre><code class="language-c">if (! pattern &amp;&amp; ! implicit_percent)
+  deps = enter_prereqs (deps, NULL);
+</code></pre>
+<p>The dependency remains a reusable pattern such as <code>%.c</code>.</p>
+<p>This is like storing “the matching source document” on a recipe card rather than choosing a particular document before you know which project is being built.</p>
+<h2>The target arrays</h2>
+<p>A pattern rule can describe more than one target:</p>
+<pre><code class="language-make">%.tab.c %.tab.h: %.y
+	$(YACC) $&lt;
+</code></pre>
+<p>The <code>struct rule</code> stores target patterns in an array:</p>
+<pre><code class="language-c">const char **targets;
+</code></pre>
+<p>For every target, it also stores:</p>
+<pre><code class="language-c">unsigned int *lens;
+const char **suffixes;
+</code></pre>
+<p>These arrays have parallel entries:</p>
+<pre><code class="language-text">targets[0]  = %.tab.c
+lens[0]     = length of %.tab.c
+suffixes[0] = address just after the %
+
+targets[1]  = %.tab.h
+lens[1]     = length of %.tab.h
+suffixes[1] = address just after the %
+</code></pre>
+<p>Why store <code>suffixes</code> instead of repeatedly searching for <code>%</code>?</p>
+<p>During implicit rule search, Make needs to compare a candidate filename with the part before and after <code>%</code> many times. A pointer directly into the cached target pattern makes those comparisons faster.</p>
+<p>For <code>%.o</code>, the pattern is divided conceptually into:</p>
+<pre><code class="language-text">prefix: &quot;&quot;
+stem:   main
+suffix: &quot;.o&quot;
+</code></pre>
+<p>For <code>lib/%.o</code>, the prefix is <code>lib/</code> and the suffix is <code>.o</code>.</p>
+<h2><code>create_pattern_rule()</code></h2>
+<p>The helper <code>create_pattern_rule()</code> assembles a complete <code>struct rule</code>:</p>
+<pre><code class="language-c">r = xmalloc (sizeof (struct rule));
+
+r-&gt;num = n;
+r-&gt;cmds = commands;
+r-&gt;deps = deps;
+r-&gt;targets = targets;
+r-&gt;suffixes = target_percents;
+</code></pre>
+<p>It allocates and fills the target-length array:</p>
+<pre><code class="language-c">r-&gt;lens = xmalloc (n * sizeof (unsigned int));
+r-&gt;_defn = NULL;
+</code></pre>
+<p>Then it records each target’s length and advances the <code>%</code> pointer:</p>
+<pre><code class="language-c">for (i = 0; i &lt; n; ++i)
+  {
+    r-&gt;lens[i] = (unsigned int) strlen (targets[i]);
+    ++r-&gt;suffixes[i];
+  }
+</code></pre>
+<p>The caller transfers ownership of the arrays to the rule. They remain valid until the rule is removed.</p>
+<p>Finally, the rule is installed:</p>
+<pre><code class="language-c">if (new_pattern_rule (r, override))
+  r-&gt;terminal = terminal ? 1 : 0;
+</code></pre>
+<p>The <code>override</code> parameter controls what happens if an equivalent rule already exists.</p>
+<h2>Installing a rule into the chain</h2>
+<p><code>new_pattern_rule()</code> initializes search-related state:</p>
+<pre><code class="language-c">rule-&gt;in_use = 0;
+rule-&gt;terminal = 0;
+rule-&gt;next = 0;
+</code></pre>
+<p>It then searches the existing chain for a duplicate. Two rules are considered equivalent when their target patterns and prerequisite names match.</p>
+<p>If the new rule does not override an existing equivalent rule, the new rule is discarded:</p>
+<pre><code class="language-c">if (d == 0 &amp;&amp; d2 == 0)
+  {
+    if (override)
+      {
+        freerule (r, lastrule);
+</code></pre>
+<p>If it does override, the old rule is removed and the new one takes its place in the chain.</p>
+<p>Otherwise, the rule is appended:</p>
+<pre><code class="language-c">if (pattern_rules == 0)
+  pattern_rules = rule;
+else
+  last_pattern_rule-&gt;next = rule;
+
+last_pattern_rule = rule;
+</code></pre>
+<p>This gives the chain stable definition order. Later, the search algorithm may sort matching candidates by stem specificity, but definition order remains useful as a tie-breaker.</p>
+<h2>Pattern rules versus static pattern rules</h2>
+<p>These two forms look similar but are stored differently.</p>
+<h3>Ordinary pattern rule</h3>
+<pre><code class="language-make">%.o: %.c
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>This rule is reusable for any matching target. It becomes a <code>struct rule</code>.</p>
+<h3>Static pattern rule</h3>
+<pre><code class="language-make">objects: %.o: %.c
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>This rule applies only to the explicit target list in <code>objects</code>. It is attached to concrete <code>struct file</code> records rather than inserted into the global pattern-rule chain.</p>
+<p>In <code>record_files()</code>, the presence of a target pattern is passed separately from the target names:</p>
+<pre><code class="language-c">if (pattern &amp;&amp; !pattern_matches (pattern, pattern_percent, name))
+  OS (error, flocp,
+      _(&quot;target '%s' doesn't match the target pattern&quot;), name);
+</code></pre>
+<p>For a static pattern rule, Make computes a stem for each concrete target:</p>
+<pre><code class="language-c">f-&gt;stem = strcache_add_len
+  (variable_buffer, o - variable_buffer);
+</code></pre>
+<p>Then it expands the prerequisite patterns with that stem:</p>
+<pre><code class="language-c">this = enter_prereqs (this, f-&gt;stem);
+</code></pre>
+<p>The result is stored on the target’s <code>struct file</code>, as described in <a href="04_struct_file.html">struct file</a>.</p>
+<p>The distinction is:</p>
+<pre><code class="language-text">pattern rule          reusable global template
+static pattern rule   concrete target rule with a pattern-shaped recipe
+</code></pre>
+<h2>Matching a target</h2>
+<p>When <code>update_file_1()</code> finds a target without a recipe, it calls:</p>
+<pre><code class="language-c">try_implicit_rule (file, depth);
+</code></pre>
+<p>This happens in <a href="../src/remake.c"><code>src/remake.c</code></a>, after Make has inspected the target’s timestamp but before it updates prerequisites.</p>
+<p><code>try_implicit_rule()</code> delegates to <code>pattern_search()</code>:</p>
+<pre><code class="language-c">if (pattern_search (file, 0, depth, 0, 0))
+  return 1;
+</code></pre>
+<p><code>pattern_search()</code> receives a concrete <code>struct file</code>, such as:</p>
+<pre><code class="language-text">build/main.o
+</code></pre>
+<p>It then examines the global <code>pattern_rules</code> chain.</p>
+<p>The search first collects rules whose target patterns could match:</p>
+<pre><code class="language-c">for (rule = pattern_rules; rule != 0; rule = rule-&gt;next)
+  {
+    unsigned int ti;
+</code></pre>
+<p>For each target pattern in a multi-target rule, it calculates a possible stem:</p>
+<pre><code class="language-c">stem = filename + (suffix - target - 1);
+stemlen = namelen - rule-&gt;lens[ti] + 1;
+</code></pre>
+<p>For <code>main.o</code> and <code>%.o</code>, the stem is <code>main</code>.</p>
+<p>For <code>lib/main.o</code> and <code>%.o</code>, Make also considers whether the directory portion should be handled separately. This is why pattern matching has special logic for slashes and VPATH directories.</p>
+<h2>Candidate sorting</h2>
+<p>A target may match several pattern rules:</p>
+<pre><code class="language-make">%.o: %.c
+	$(CC) -c $&lt; -o $@
+
+lib/%.o: lib/%.c
+	$(CC) -fPIC -c $&lt; -o $@
+</code></pre>
+<p>For <code>lib/main.o</code>, both patterns may look relevant. Make records possible candidates in <code>struct tryrule</code>:</p>
+<pre><code class="language-c">struct tryrule
+  {
+    struct rule *rule;
+    size_t stemlen;
+    unsigned int matches;
+    unsigned int order;
+</code></pre>
+<p>The <code>matches</code> field identifies which target pattern in a multi-target rule matched. The <code>order</code> field preserves definition order.</p>
+<p>Candidates are sorted with:</p>
+<pre><code class="language-c">qsort (tryrules, nrules, sizeof (struct tryrule),
+       stemlen_compare);
+</code></pre>
+<p>The comparison function prefers shorter stems:</p>
+<pre><code class="language-c">int
+stemlen_compare (const void *v1, const void *v2)
+{
+  const struct tryrule *r1 = v1;
+  const struct tryrule *r2 = v2;
+  int r = (int) (r1-&gt;stemlen - r2-&gt;stemlen);
+</code></pre>
+<p>The shorter stem usually means the longer fixed prefix and suffix matched, which makes the rule more specific.</p>
+<p>This is like choosing between:</p>
+<pre><code class="language-text">Any department / any document
+Library department / any document
+</code></pre>
+<p>The second instruction is more specific because it says more about where the item belongs.</p>
+<h2>Checking prerequisites</h2>
+<p>Finding a target-pattern match is not enough. Make must also determine whether the resulting prerequisites exist or can be built.</p>
+<p>For a candidate <code>%.o: %.c</code>, matching <code>main.o</code> produces:</p>
+<pre><code class="language-text">main.c
+</code></pre>
+<p>The implicit search substitutes the stem into each dependency:</p>
+<pre><code class="language-c">if (! dep-&gt;need_2nd_expansion)
+  {
+    const char *cp = strchr (nptr, '%');
+    if (cp == 0)
+      strcpy (depname, nptr);
+</code></pre>
+<p>When <code>%</code> is present, the code copies the prefix, stem, and suffix:</p>
+<pre><code class="language-c">o = mempcpy (o, nptr, cp - nptr);
+o = mempcpy (o, stem, stemlen);
+strcpy (o, cp + 1);
+</code></pre>
+<p>The resulting name is tested through several possibilities:</p>
+<ol>
+<li>It may already exist.</li>
+<li>It may be found through VPATH.</li>
+<li>It may be explicitly expected by another rule.</li>
+<li>Another implicit rule may be able to create it.</li>
+<li>If none applies, the candidate rule is rejected.</li>
+</ol>
+<p>This recursive search is what allows chains such as:</p>
+<pre><code class="language-text">program
+  depends on program.o
+    depends on program.c
+</code></pre>
+<p>or more complex chains involving generated intermediates.</p>
+<p>The dependency metadata from <a href="05_struct_dep.html"><code>struct dep</code></a> is copied into the concrete dependencies:</p>
+<pre><code class="language-c">d-&gt;ignore_mtime = dep-&gt;ignore_mtime;
+d-&gt;ignore_automatic_vars = dep-&gt;ignore_automatic_vars;
+d-&gt;wait_here |= dep-&gt;wait_here;
+d-&gt;is_explicit = is_explicit;
+</code></pre>
+<p>The rule template supplies the edge behavior; the concrete target receives a new set of edges.</p>
+<h2>Second expansion in pattern rules</h2>
+<p>Pattern rules may use secondary expansion:</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+
+%.o: $$($$*_INPUT)
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>For second expansion, Make cannot simply replace <code>%</code> with the raw stem before expansion. The stem itself might contain characters that should not be expanded again.</p>
+<p>The implementation replaces <code>%</code> with an automatic-variable reference:</p>
+<pre><code class="language-c">if (check_lastslash)
+  o = mempcpy (o, &quot;$(*F)&quot;, 5);
+else
+  o = mempcpy (o, &quot;$*&quot;, 2);
+</code></pre>
+<p>Then it expands the resulting expression in the target’s context:</p>
+<pre><code class="language-c">p = variable_expand_for_file (depname, file);
+</code></pre>
+<p>This connects the rule engine to the variable and expansion systems explained in <a href="02_struct_variable.html">struct variable</a> and <a href="03_variable_expand.html">variable_expand</a>.</p>
+<p>The sequence is:</p>
+<pre><code class="language-text">pattern prerequisite
+        ↓
+substitute stem placeholder
+        ↓
+activate target variables
+        ↓
+perform second expansion
+        ↓
+create concrete dependency edges
+</code></pre>
+<h2>Building the concrete target</h2>
+<p>Once a suitable rule is found, <code>pattern_search()</code> transfers its recipe and prerequisites to the target’s <code>struct file</code>.</p>
+<p>The selected recipe is shared:</p>
+<pre><code class="language-c">file-&gt;cmds = rule-&gt;cmds;
+file-&gt;is_target = 1;
+</code></pre>
+<p>The concrete dependencies are already stored in <code>file-&gt;deps</code>.</p>
+<p>Make also records the matched stem:</p>
+<pre><code class="language-c">file-&gt;stem = strcache_add_len (stem, stemlen);
+</code></pre>
+<p>That stem later becomes automatic variable <code>$*</code>. When the recipe runs, <code>set_file_variables()</code> uses the target’s stem to define automatic variables such as <code>$@</code>, <code>$&lt;</code>, and <code>$*</code>.</p>
+<p>This is an important ownership boundary:</p>
+<pre><code class="language-text">struct rule
+  owns the reusable template
+
+struct file
+  owns the selected concrete build state
+</code></pre>
+<p>The rule remains available for other targets. The file record now knows which rule was selected for this particular target.</p>
+<h2>Multi-target pattern rules</h2>
+<p>A pattern rule may create several related targets:</p>
+<pre><code class="language-make">%.tab.c %.tab.h: %.y
+	$(YACC) $&lt;
+</code></pre>
+<p>The rule stores both target patterns in <code>targets</code> and sets <code>num</code> to <code>2</code>.</p>
+<p>When one target matches, <code>pattern_search()</code> creates the other targets as peers:</p>
+<pre><code class="language-c">new-&gt;name = strcache_add (nm);
+new-&gt;file = enter_file (new-&gt;name);
+new-&gt;next = file-&gt;also_make;
+</code></pre>
+<p>The peer is linked through the selected target’s <code>also_make</code> field.</p>
+<p>This is the pattern-rule counterpart to grouped targets explained in <a href="04_struct_file.html">struct file</a>. One recipe produces multiple outputs, so Make must remember all of them.</p>
+<p>The resulting conceptual state is:</p>
+<pre><code class="language-text">main.tab.c
+  recipe: YACC
+  also_make -&gt; main.tab.h
+
+main.tab.h
+  same grouped build state
+</code></pre>
+<p>If the recipe updates one output but not the other, Make can warn:</p>
+<pre><code class="language-text">warning: pattern recipe did not update peer target
+</code></pre>
+<h2>Terminal rules</h2>
+<p>A rule can be marked terminal:</p>
+<pre><code class="language-c">char terminal;
+</code></pre>
+<p>Terminal pattern rules are installed by <code>install_pattern_rule()</code> with a nonzero terminal argument:</p>
+<pre><code class="language-c">r-&gt;terminal = terminal ? 1 : 0;
+</code></pre>
+<p>Terminal rules tell implicit search not to continue through certain chains. They are commonly used for source-control extraction rules such as:</p>
+<pre><code class="language-make">%: %,v
+	$(CHECKOUT,v)
+</code></pre>
+<p>Once Make finds a terminal rule that can produce a target, it should not keep treating the result as an intermediate candidate for another pattern search.</p>
+<p>The search checks this state:</p>
+<pre><code class="language-c">if (intermed_ok &amp;&amp; rule-&gt;terminal)
+  continue;
+</code></pre>
+<p>The exact search policy is complex, but the intuition is simple: a terminal rule is an endpoint on the recipe map.</p>
+<h2>The <code>in_use</code> flag prevents recursive loops</h2>
+<p>Implicit rule search can recurse. To build a missing prerequisite, Make may search for another implicit rule, which may search for another prerequisite, and so on.</p>
+<p>The <code>in_use</code> flag marks a rule currently being explored:</p>
+<pre><code class="language-c">if (rule-&gt;in_use)
+  {
+    DBS (DB_IMPLICIT,
+         (_(&quot;Avoiding implicit rule recursion for rule '%s'.\n&quot;),
+          get_rule_defn (rule)));
+    continue;
+  }
+</code></pre>
+<p>Before searching its prerequisites, Make marks the rule:</p>
+<pre><code class="language-c">rule-&gt;in_use = 1;
+</code></pre>
+<p>After the candidate has been tested, it clears the mark:</p>
+<pre><code class="language-c">rule-&gt;in_use = 0;
+</code></pre>
+<p>This is like placing a “currently visiting” sign on a recipe card. If following a dependency brings Make back to the same card, it skips that route rather than looping forever.</p>
+<p>The <code>updating</code> flag in <code>struct file</code>, discussed in <a href="04_struct_file.html">struct file</a>, catches cycles among concrete targets. <code>in_use</code> catches recursive reuse of a pattern-rule template. They solve related but distinct problems.</p>
+<h2>Built-in suffix rules become pattern rules</h2>
+<p>GNU Make supports older suffix rules such as:</p>
+<pre><code class="language-make">.c.o:
+	$(CC) -c $(CFLAGS) -o $@ $&lt;
+</code></pre>
+<p>Internally, Make converts these into pattern rules.</p>
+<p><code>convert_to_pattern()</code> walks the suffix list stored in <code>.SUFFIXES</code>:</p>
+<pre><code class="language-c">for (d = suffix_file-&gt;deps; d != 0; d = d-&gt;next)
+  {
+    size_t slen;
+</code></pre>
+<p>For a suffix rule <code>.c.o</code>, it constructs:</p>
+<pre><code class="language-text">%.o: %.c
+</code></pre>
+<p>through <code>convert_suffix_rule()</code>:</p>
+<pre><code class="language-c">p[0] = '%';
+memcpy (p + 1, target, len);
+</code></pre>
+<p>The dependency receives the same transformation:</p>
+<pre><code class="language-c">p[0] = '%';
+memcpy (p + 1, source, len);
+</code></pre>
+<p>Then the converted rule is installed with:</p>
+<pre><code class="language-c">create_pattern_rule (names, percents, 1, 0, deps, cmds, 0);
+</code></pre>
+<p>This unifies old and new syntax. Once conversion is complete, the implicit search machinery can treat a suffix rule and a user-written <code>%</code> rule in the same general way.</p>
+<h2>Default pattern rules</h2>
+<p>Built-in pattern rules are described in <a href="../src/default.c"><code>src/default.c</code></a> using <code>struct pspec</code>:</p>
+<pre><code class="language-c">struct pspec
+  {
+    const char *target;
+    const char *dep;
+    const char *commands;
+  };
+</code></pre>
+<p>For example, a built-in rule may be represented conceptually as:</p>
+<pre><code class="language-text">target:   %.o
+dependency: %.c
+commands: $(COMPILE.c) $(OUTPUT_OPTION) $&lt;
+</code></pre>
+<p><code>install_default_implicit_rules()</code> walks the built-in specifications:</p>
+<pre><code class="language-c">for (p = default_pattern_rules; p-&gt;target != 0; ++p)
+  install_pattern_rule (p, 0);
+</code></pre>
+<p><code>install_pattern_rule()</code> allocates a <code>struct rule</code>, parses its prerequisites, creates its <code>struct commands</code>, and adds it to the chain.</p>
+<p>The same path is used for terminal defaults:</p>
+<pre><code class="language-c">for (p = default_terminal_rules; p-&gt;target != 0; ++p)
+  install_pattern_rule (p, 1);
+</code></pre>
+<p>The built-in recipe text is not fundamentally different from user recipe text. It is simply installed before the build begins.</p>
+<h2>Rule definition caching</h2>
+<p>The <code>_defn</code> field caches a printable representation of a rule:</p>
+<pre><code class="language-c">char *_defn;
+</code></pre>
+<p>It starts as <code>NULL</code>. <code>get_rule_defn()</code> constructs it on first use and stores it:</p>
+<pre><code class="language-c">if (r-&gt;_defn == NULL)
+  {
+    size_t len = 8;
+    unsigned int k;
+</code></pre>
+<p>The resulting string includes:</p>
+<ul>
+<li>all target patterns;</li>
+<li><code>:</code> or <code>::</code>;</li>
+<li>normal prerequisites;</li>
+<li>order-only prerequisites after <code>|</code>;</li>
+<li><code>.WAIT</code> markers.</li>
+</ul>
+<p>For example:</p>
+<pre><code class="language-text">%.o: %.c | .WAIT generated
+</code></pre>
+<p>The cached definition is used in:</p>
+<ul>
+<li>implicit-rule debug messages;</li>
+<li>recursion diagnostics;</li>
+<li><code>make -p</code>;</li>
+<li>rule comparison explanations.</li>
+</ul>
+<p>Caching avoids rebuilding the same printable text every time Make reports the rule.</p>
+<h2>Printing the rule database</h2>
+<p>The rule database is visible with:</p>
+<pre><code class="language-sh">make -p
+</code></pre>
+<p><code>print_rule_data_base()</code> walks <code>pattern_rules</code>:</p>
+<pre><code class="language-c">for (r = pattern_rules; r != 0; r = r-&gt;next)
+  {
+    ++rules;
+    print_rule (r);
+</code></pre>
+<p>Each rule is printed using <code>get_rule_defn()</code>:</p>
+<pre><code class="language-c">fputs (get_rule_defn (r), stdout);
+putchar ('\n');
+</code></pre>
+<p>If it has a recipe, Make prints that too:</p>
+<pre><code class="language-c">if (r-&gt;cmds != 0)
+  print_commands (r-&gt;cmds);
+</code></pre>
+<p>This output helps answer questions such as:</p>
+<ul>
+<li>Did Make install the built-in rule?</li>
+<li>Did the user rule replace a duplicate?</li>
+<li>Is the rule terminal?</li>
+<li>What prerequisite patterns does it contain?</li>
+<li>Which file and line supplied its recipe?</li>
+</ul>
+<h2>Removing a rule</h2>
+<p>When an equivalent rule is overridden, <code>freerule()</code> releases the rule’s private storage:</p>
+<pre><code class="language-c">free_dep_chain (rule-&gt;deps);
+free ((void *)rule-&gt;targets);
+free ((void *)rule-&gt;suffixes);
+free (rule-&gt;lens);
+</code></pre>
+<p>The recipe is deliberately not freed:</p>
+<pre><code class="language-c">/* We can't free the storage for the commands because there
+   are ways that they could be in more than one place. */
+</code></pre>
+<p>A <code>struct commands</code> may be shared by:</p>
+<ul>
+<li>multiple suffix-rule file records;</li>
+<li>several pattern rules;</li>
+<li>a converted suffix rule;</li>
+<li>or multiple targets from one parsed rule.</li>
+</ul>
+<p>The rule owns its target arrays and dependency chain, but command ownership can be shared elsewhere.</p>
+<p>This is similar to deleting one index card while leaving a shared recipe booklet in the library because other cards still refer to it.</p>
+<h2>One complete example</h2>
+<p>Consider:</p>
+<pre><code class="language-make">CC = cc
+
+%.o: %.c | generated
+	$(CC) -c $&lt; -o $@
+
+generated:
+	mkdir -p generated
+</code></pre>
+<p>The process is approximately:</p>
+<ol>
+<li>The parser recognizes <code>%.o</code> and finds <code>%</code>.</li>
+<li>It creates a <code>struct commands</code> for the compile recipe.</li>
+<li>It creates <code>struct dep</code> records for <code>%.c</code> and <code>generated</code>.</li>
+<li>It creates a <code>struct rule</code> containing:
+<ul>
+<li>target array: <code>%.o</code>;</li>
+<li>dependency chain: <code>%.c</code>, <code>generated</code>;</li>
+<li>recipe pointer;</li>
+<li>cached pattern metadata.</li>
+</ul>
+</li>
+<li>Later, Make encounters <code>main.o</code>.</li>
+<li><code>try_implicit_rule()</code> starts pattern search.</li>
+<li><code>%.o</code> matches, producing stem <code>main</code>.</li>
+<li><code>%.c</code> becomes <code>main.c</code>.</li>
+<li><code>generated</code> remains an order-only prerequisite.</li>
+<li>Make copies the selected dependencies into <code>main.o-&gt;deps</code>.</li>
+<li>Make assigns the shared recipe to <code>main.o-&gt;cmds</code>.</li>
+<li>Make records <code>main</code> as <code>main.o-&gt;stem</code>.</li>
+<li>Recipe expansion later provides <code>$&lt;</code>, <code>$@</code>, and <code>$*</code>.</li>
+</ol>
+<p>The reusable rule stays on the global shelf. The concrete target receives a selected copy of the dependency edges and a pointer to the shared recipe.</p>
+<h2>The complete rule-selection path</h2>
+<pre class="mermaid">sequenceDiagram
+    participant Parser as Makefile parser
+    participant Rules as Rule chain
+    participant Search as Implicit search
+    participant File as Target record
+    participant Recipe as Recipe runner
+
+    Parser->>Rules: Store target patterns and prerequisite templates
+    Search->>Rules: Test patterns against concrete target
+    Rules-->>Search: Return matching rule candidates
+    Search->>File: Attach concrete prerequisites and recipe
+    Recipe->>File: Read stem and target context
+    Recipe->>Recipe: Expand and execute selected recipe
+</pre>
+<p>The important transition is from reusable text to concrete build state:</p>
+<pre><code class="language-text">pattern rule template
+        ↓
+target match
+        ↓
+stem substitution
+        ↓
+concrete struct dep records
+        ↓
+struct file with selected recipe
+        ↓
+recipe execution
+</code></pre>
+<h2>A compact mental model</h2>
+<p>Think of <code>struct rule</code> as a reusable recipe card with several compartments.</p>
+<h3>Target patterns</h3>
+<pre><code class="language-c">targets
+lens
+suffixes
+num
+</code></pre>
+<p>These say which filenames the card can describe and make <code>%</code> matching efficient.</p>
+<h3>Prerequisite templates</h3>
+<pre><code class="language-c">deps
+</code></pre>
+<p>These are dependency arrows before their <code>%</code> placeholders have been replaced. Their edge flags come from <a href="05_struct_dep.html"><code>struct dep</code></a>.</p>
+<h3>Recipe template</h3>
+<pre><code class="language-c">cmds
+</code></pre>
+<p>This points to the reusable command text. It is expanded only after a concrete target is selected.</p>
+<h3>Search state</h3>
+<pre><code class="language-c">terminal
+in_use
+</code></pre>
+<p>These control where the rule may be used and prevent recursive searches from reusing a rule incorrectly.</p>
+<h3>Rule-list links</h3>
+<pre><code class="language-c">next
+</code></pre>
+<p>This connects all pattern rules into the global search chain.</p>
+<h3>Diagnostics</h3>
+<pre><code class="language-c">_defn
+</code></pre>
+<p>This caches a readable description for debugging and database printing.</p>
+<p>The full lifecycle is:</p>
+<pre><code class="language-text">makefile pattern rule
+        ↓
+parse targets, prerequisites, and recipe
+        ↓
+create struct rule
+        ↓
+add to pattern_rules
+        ↓
+search for a concrete target
+        ↓
+calculate the stem
+        ↓
+substitute prerequisite patterns
+        ↓
+attach commands and deps to struct file
+        ↓
+expand and execute the recipe
+</code></pre>
+<h2>Key takeaways</h2>
+<ul>
+<li>A <code>struct rule</code> stores a reusable implicit or pattern-rule template.</li>
+<li>Pattern rules are kept in the global <code>pattern_rules</code> linked list.</li>
+<li><code>record_files()</code> recognizes target patterns and calls <code>create_pattern_rule()</code>.</li>
+<li>Target patterns, lengths, and pointers after <code>%</code> are stored in parallel arrays.</li>
+<li>Prerequisites remain as pattern-shaped <code>struct dep</code> records until a target matches.</li>
+<li>Recipes are stored through <code>struct commands</code> and expanded only for a concrete target.</li>
+<li><code>new_pattern_rule()</code> handles duplicate rules, override behavior, and chain insertion.</li>
+<li><code>pattern_search()</code> tests rules against concrete targets and calculates stems.</li>
+<li>Candidate rules are sorted by stem length and definition order.</li>
+<li>A matching rule must also have usable prerequisites; pattern matching alone is not enough.</li>
+<li>Pattern prerequisites can be found locally, through VPATH, or through recursive implicit searches.</li>
+<li>Static pattern rules are attached to concrete <code>struct file</code> records rather than the global rule chain.</li>
+<li>Multi-target pattern rules use <code>also_make</code> to represent peer outputs.</li>
+<li>Terminal rules stop certain forms of recursive implicit search.</li>
+<li><code>in_use</code> prevents a pattern rule from recursively selecting itself.</li>
+<li>Old suffix rules are converted into pattern rules so the implicit search engine can use one representation.</li>
+<li>Built-in rules use the same <code>struct rule</code> machinery as user-defined rules.</li>
+<li><code>make -p</code> prints the rule database and its recipes.</li>
+<li>Rule-owned dependency and target storage can be freed, but command records may be shared.</li>
+</ul>
+<p>Now that you understand how Make stores reusable rule templates and turns them into concrete target recipes, the next question is how a chain of goals is walked, updated, and reported as complete. That is the subject of <a href="07_update_goal_chain.html">update_goal_chain</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="05_struct_dep.html">&larr; struct dep</a></span>
+    <span><a href="07_update_goal_chain.html">update_goal_chain &rarr;</a></span>
+  </nav>
+</body>
+</html>

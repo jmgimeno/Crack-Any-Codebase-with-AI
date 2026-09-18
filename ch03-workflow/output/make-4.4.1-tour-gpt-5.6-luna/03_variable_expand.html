@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>variable_expand — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 3: variable_expand</h1>
+<p>What should happen when a makefile says:</p>
+<pre><code class="language-make">CC = gcc
+program: main.o
+	$(CC) -o $@ $^
+</code></pre>
+<p>The recipe is not ready to run when Make first reads it. <code>$(CC)</code>, <code>$@</code>, and <code>$^</code> are symbolic instructions. Make must resolve them at the right time, in the right variable scope, and with the right rules for functions, substitutions, and escaped dollar signs.</p>
+<p>This is the job of <code>variable_expand</code>.</p>
+<blockquote>
+<p><strong>Description:</strong> This engine replaces references such as <code>$(CC)</code>, evaluates built-in functions, performs substitutions, and can invoke shell commands. It is the language interpreter inside Make. Like a spreadsheet calculating formulas, it turns symbolic text into the concrete strings needed for prerequisites, recipes, and environments.</p>
+</blockquote>
+<p>The previous chapter explained how definitions are stored in <a href="02_struct_variable.html"><code>struct variable</code></a>. This chapter follows those definitions as they become text.</p>
+<h2>Where expansion fits</h2>
+<p>The main expansion API is declared in <a href="../src/variable.h"><code>src/variable.h</code></a>:</p>
+<pre><code class="language-c">char *variable_expand (const char *line);
+char *variable_expand_for_file (const char *line,
+                                struct file *file);
+char *variable_expand_string (char *line,
+                              const char *string,
+                              size_t length);
+</code></pre>
+<p>There are three closely related entry points:</p>
+<ul>
+<li><code>variable_expand()</code> expands text using the current variable context.</li>
+<li><code>variable_expand_for_file()</code> expands text using a target’s variables.</li>
+<li><code>variable_expand_string()</code> performs the actual scanning and writes into Make’s expansion buffer.</li>
+</ul>
+<p>A useful mental model is a printing press:</p>
+<ol>
+<li>The input is a page containing symbolic marks such as <code>$(CC)</code>.</li>
+<li>The expansion engine reads the page from left to right.</li>
+<li>It looks up each mark or function.</li>
+<li>It prints the resulting characters into an output buffer.</li>
+<li>The returned page is valid until another expansion reuses the press.</li>
+</ol>
+<p>The output is therefore usually temporary. Callers that need to keep it use an allocating wrapper such as:</p>
+<pre><code class="language-c">char *allocated_variable_expand_for_file
+  (const char *line, struct file *file);
+</code></pre>
+<p>The macro in <code>variable.h</code> provides the common global-context form:</p>
+<pre><code class="language-c">#define allocated_variable_expand(line) \
+  allocated_variable_expand_for_file (line, (struct file *) 0)
+</code></pre>
+<h2>The expansion pipeline</h2>
+<p>Expansion occurs in many parts of Make:</p>
+<ul>
+<li><code>read_all_makefiles()</code> expands <code>MAKEFILES</code> before reading those files.</li>
+<li>The parser expands <code>include</code> filenames.</li>
+<li>Dependency processing expands prerequisites.</li>
+<li>Recipe execution expands command lines.</li>
+<li>Environment construction expands exported recursive variables.</li>
+<li>Built-in functions expand their arguments.</li>
+<li>The <code>eval</code> function sends expanded text back to the makefile parser.</li>
+</ul>
+<p>The broad flow looks like this:</p>
+<pre class="mermaid">sequenceDiagram
+    participant Caller as Caller
+    participant Expand as Expansion engine
+    participant Vars as Variable scopes
+    participant Funcs as Function table
+    participant Shell as Shell process
+
+    Caller->>Expand: Submit symbolic text
+    Expand->>Vars: Look up referenced names
+    Vars-->>Expand: Return visible variable values
+    Expand->>Funcs: Dispatch built in function
+    Funcs-->>Expand: Return function result
+    Expand->>Shell: Run shell function when requested
+    Shell-->>Expand: Return command output
+    Expand-->>Caller: Return expanded text
+</pre>
+<p>The expansion engine is not itself the build scheduler. It does not decide whether a target is out of date; that work belongs to the file and dependency machinery described later in <a href="04_struct_file.html"><code>struct file</code></a> and <a href="05_struct_dep.html"><code>struct dep</code></a>. Expansion prepares the strings those systems consume.</p>
+<h2>The shared variable buffer</h2>
+<p>Most expansion output is written into a global buffer named <code>variable_buffer</code>:</p>
+<pre><code class="language-c">static size_t variable_buffer_length;
+char *variable_buffer;
+</code></pre>
+<p>The buffer is initialized early in <code>main()</code>:</p>
+<pre><code class="language-c">initialize_variable_output ();
+</code></pre>
+<p>The initialization function allocates an initial region:</p>
+<pre><code class="language-c">if (variable_buffer == 0)
+  {
+    variable_buffer_length = 200;
+    variable_buffer = xmalloc (variable_buffer_length);
+</code></pre>
+<p>The buffer grows when necessary. <code>variable_buffer_output()</code> receives a destination pointer, copies characters into the buffer, and returns the next free position.</p>
+<p>This is like a reusable clipboard. Every expansion writes onto the same clipboard instead of allocating a new clipboard for every short note.</p>
+<p>That reuse is efficient, but it creates an important rule:</p>
+<blockquote>
+<p>The result of <code>variable_expand()</code> is temporary and may be overwritten by the next expansion.</p>
+</blockquote>
+<p>For example, this is unsafe:</p>
+<pre><code class="language-c">char *a = variable_expand (&quot;$(A)&quot;);
+char *b = variable_expand (&quot;$(B)&quot;);
+</code></pre>
+<p>After the second call, <code>a</code> may point into the same buffer now containing the expansion of <code>$(B)</code>.</p>
+<p>When a caller needs independent storage, it uses <code>allocated_variable_expand_for_file()</code>. That function temporarily replaces the active buffer, performs expansion, and returns a separately allocated result:</p>
+<pre><code class="language-c">char *obuf = variable_buffer;
+size_t olen = variable_buffer_length;
+
+variable_buffer = 0;
+value = variable_expand_for_file (line, file);
+</code></pre>
+<p>It then restores the original buffer:</p>
+<pre><code class="language-c">variable_buffer = obuf;
+variable_buffer_length = olen;
+return value;
+</code></pre>
+<p>This is like temporarily putting the shared clipboard aside, writing on a fresh sheet, and then restoring the clipboard for the caller.</p>
+<h2>Scanning ordinary text</h2>
+<p>The main scanner is <code>variable_expand_string()</code>. It first copies the input:</p>
+<pre><code class="language-c">save = length == SIZE_MAX ? xstrdup (string)
+                          : xstrndup (string, length);
+p = save;
+</code></pre>
+<p>The copy protects expansion from changes caused by functions such as <code>eval</code>, which can redefine variables while the current string is being processed.</p>
+<p>The scanner copies ordinary characters in chunks:</p>
+<pre><code class="language-c">p1 = strchr (p, '$');
+
+o = variable_buffer_output
+  (o, p, p1 != 0 ? (size_t) (p1 - p) : strlen (p) + 1);
+</code></pre>
+<p>If there is no dollar sign, the remaining text is copied directly. If there is one, the scanner dispatches based on the next character.</p>
+<p>The simplest cases are dollar signs:</p>
+<pre><code class="language-c">case '$':
+case '\0':
+  o = variable_buffer_output (o, p1, 1);
+  break;
+</code></pre>
+<p>This makes:</p>
+<pre><code class="language-make">literal = $$HOME
+</code></pre>
+<p>expand to:</p>
+<pre><code class="language-text">$HOME
+</code></pre>
+<p>A dollar sign followed by an ordinary character is a one-character variable reference:</p>
+<pre><code class="language-make">$(info compiler is $CC)
+</code></pre>
+<p><code>$C</code> and <code>$(C)</code> refer to the same one-character variable name. The code handles this through <code>reference_variable()</code>.</p>
+<p>A dollar sign followed by whitespace has no useful variable name, so the scanner leaves it alone.</p>
+<h2>Looking up a simple variable</h2>
+<p><code>reference_variable()</code> connects expansion to the variable records described in <a href="02_struct_variable.html"><code>struct variable</code></a>:</p>
+<pre><code class="language-c">v = lookup_variable (name, length);
+
+if (v == 0)
+  warn_undefined (name, length);
+</code></pre>
+<p>If the variable is absent, Make normally expands it to an empty string. With <code>--warn-undefined-variables</code>, the lookup also produces a warning.</p>
+<p>If the variable exists, the engine chooses between direct and recursive expansion:</p>
+<pre><code class="language-c">value = (v-&gt;recursive
+         ? recursively_expand (v)
+         : v-&gt;value);
+</code></pre>
+<p>A simple variable already contains its final value:</p>
+<pre><code class="language-make">CFLAGS := -O2
+</code></pre>
+<p>So the stored <code>v-&gt;value</code> can be copied directly.</p>
+<p>A recursive variable contains another expression:</p>
+<pre><code class="language-make">CFLAGS = $(WARN) -O2
+</code></pre>
+<p>So Make calls <code>recursively_expand()</code> to interpret that expression now.</p>
+<p>The result is appended to the output buffer:</p>
+<pre><code class="language-c">o = variable_buffer_output (o, value, strlen (value));
+
+if (v-&gt;recursive)
+  free (value);
+</code></pre>
+<p>The temporary result of recursive expansion is freed after being copied.</p>
+<h2>Recursive expansion and cycles</h2>
+<p>Recursive variables are powerful because their references are delayed:</p>
+<pre><code class="language-make">MESSAGE = hello
+GREETING = $(MESSAGE), world
+MESSAGE = goodbye
+</code></pre>
+<p>When <code>$(GREETING)</code> is expanded, the result is:</p>
+<pre><code class="language-text">goodbye, world
+</code></pre>
+<p>The current value of <code>MESSAGE</code> is consulted at use time.</p>
+<p>But delayed evaluation can create a loop:</p>
+<pre><code class="language-make">A = $(B)
+B = $(A)
+</code></pre>
+<p><code>recursively_expand_for_file()</code> marks a variable while it is being expanded:</p>
+<pre><code class="language-c">if (v-&gt;expanding)
+  {
+    if (!v-&gt;exp_count)
+      OS (fatal, *expanding_var,
+          _(&quot;Recursive variable '%s' references itself (eventually)&quot;),
+          v-&gt;name);
+</code></pre>
+<p>Then it sets the marker before recursively expanding:</p>
+<pre><code class="language-c">v-&gt;expanding = 1;
+value = allocated_variable_expand (v-&gt;value);
+v-&gt;expanding = 0;
+</code></pre>
+<p>The <code>expanding</code> bit is like a “currently visiting” sign on a folder. If opening folder <code>A</code> leads to folder <code>B</code>, which leads back to <code>A</code>, Make detects the loop rather than recursing forever.</p>
+<p>The <code>exp_count</code> field supports controlled self-reference used by functions such as <code>call</code>. Ordinary cyclic variables have no remaining expansion allowance and produce a fatal diagnostic.</p>
+<h2>Nested variable names</h2>
+<p>Variable names can themselves contain references:</p>
+<pre><code class="language-make">tool = CC
+CC = clang
+
+result = $($(tool))
+</code></pre>
+<p>To expand <code>$($(tool))</code>, Make must:</p>
+<ol>
+<li>Expand <code>$(tool)</code> to <code>CC</code>.</li>
+<li>Use the result <code>CC</code> as the name of another variable.</li>
+<li>Look up <code>CC</code>.</li>
+<li>Produce <code>clang</code>.</li>
+</ol>
+<p>The scanner detects a dollar sign inside a parenthesized reference:</p>
+<pre><code class="language-c">p1 = lindex (beg, end, '$');
+if (p1 != 0)
+  {
+    abeg = expand_argument (beg, p);
+    beg = abeg;
+    end = strchr (beg, '\0');
+  }
+</code></pre>
+<p><code>expand_argument()</code> expands the inner name without destroying the surrounding expansion buffer.</p>
+<p>This is similar to looking up a contact using a contact name that was itself retrieved from another address book.</p>
+<p>Nested names are useful for tables of settings:</p>
+<pre><code class="language-make">mode = debug
+CFLAGS_debug = -g
+CFLAGS_release = -O2
+
+CFLAGS = $(CFLAGS_$(mode))
+</code></pre>
+<p>The expansion engine does not need a special table feature. Nested variable references provide the indirection.</p>
+<h2>Substitution references</h2>
+<p>Make supports a compact substitution form:</p>
+<pre><code class="language-make">objects = main.o util.o
+sources = $(objects:.o=.c)
+</code></pre>
+<p>The result is:</p>
+<pre><code class="language-text">main.c util.c
+</code></pre>
+<p>When the scanner finds a colon inside a reference, it treats the expression as a possible substitution:</p>
+<pre><code class="language-c">colon = lindex (beg, end, ':');
+if (colon)
+  {
+    const char *subst_beg = colon + 1;
+    const char *subst_end = lindex (subst_beg, end, '=');
+</code></pre>
+<p>The part before the colon is the variable name. The text between the colon and equals sign is the old suffix or pattern. The text after the equals sign is the replacement.</p>
+<p>The engine looks up the source variable:</p>
+<pre><code class="language-c">v = lookup_variable (beg, colon - beg);
+</code></pre>
+<p>It then expands that variable if necessary:</p>
+<pre><code class="language-c">char *value = (v-&gt;recursive
+               ? recursively_expand (v)
+               : v-&gt;value);
+</code></pre>
+<p>Finally, it calls <code>patsubst_expand_pat()</code> to perform the replacement.</p>
+<p>The implementation represents a suffix substitution as a pattern substitution internally. It adds a temporary <code>%</code> to both sides when needed, so the same matching machinery can handle:</p>
+<ul>
+<li>literal suffix changes such as <code>.o</code> to <code>.c</code>,</li>
+<li>pattern changes such as <code>src/%.c</code> to <code>build/%.o</code>.</li>
+</ul>
+<p>The larger substitution functions are implemented in <a href="../src/function.c"><code>src/function.c</code></a>, alongside functions such as <code>subst</code> and <code>patsubst</code>.</p>
+<h2>Built-in functions</h2>
+<p>A reference such as:</p>
+<pre><code class="language-make">$(patsubst %.c,%.o,$(SOURCES))
+</code></pre>
+<p>looks like an ordinary variable reference because it begins with <code>$(</code>. Before treating it as a variable name, <code>variable_expand_string()</code> asks <code>handle_function()</code> whether the contents name a built-in function:</p>
+<pre><code class="language-c">op = o;
+begp = p;
+if (handle_function (&amp;op, &amp;begp))
+  {
+    o = op;
+    p = begp;
+    break;
+  }
+</code></pre>
+<p>The function table is initialized by <code>hash_init_function_table()</code> in <code>main.c</code>. Each entry records:</p>
+<ul>
+<li>the function name,</li>
+<li>its minimum and maximum argument counts,</li>
+<li>whether arguments should be expanded first,</li>
+<li>and the C function that implements it.</li>
+</ul>
+<p>For example, the table contains entries like:</p>
+<pre><code class="language-c">FT_ENTRY (&quot;patsubst&quot;, 3, 3, 1, func_patsubst),
+FT_ENTRY (&quot;shell&quot;,   0, 1, 1, func_shell),
+FT_ENTRY (&quot;eval&quot;,    0, 1, 1, func_eval),
+</code></pre>
+<p><code>handle_function()</code> identifies the function name and finds its closing parenthesis while respecting nested references:</p>
+<pre><code class="language-c">entry_p = lookup_function (beg);
+
+if (!entry_p)
+  return 0;
+</code></pre>
+<p>It then splits the comma-separated arguments. Nested parentheses are counted, so this works:</p>
+<pre><code class="language-make">$(if $(filter %.c,$(file)),yes,no)
+</code></pre>
+<p>For functions marked <code>expand_args</code>, each argument is expanded before the C implementation receives it. This is appropriate for functions such as <code>subst</code>, <code>filter</code>, and <code>patsubst</code>.</p>
+<p>Some functions deliberately delay argument expansion. <code>foreach</code>, <code>let</code>, <code>if</code>, <code>and</code>, and <code>or</code> need control over which parts are evaluated and when. For example:</p>
+<pre><code class="language-make">$(if $(READY),$(shell expensive-command),)
+</code></pre>
+<p>Only the selected branch is expanded. This lets <code>if</code> avoid running the shell command when <code>READY</code> is empty.</p>
+<h2>Function results use the same output buffer</h2>
+<p>A built-in function receives an output pointer and appends its result:</p>
+<pre><code class="language-c">static char *
+func_patsubst (char *o, char **argv,
+                const char *funcname UNUSED)
+{
+  return patsubst_expand (o, argv[2], argv[0], argv[1]);
+}
+</code></pre>
+<p>Functions do not normally return a separate string. They write into <code>variable_buffer</code>, just like ordinary variable references.</p>
+<p>Simple text functions such as <code>words</code>, <code>firstword</code>, and <code>strip</code> scan their arguments and call <code>variable_buffer_output()</code> for their results.</p>
+<p>This design allows nested functions to compose efficiently:</p>
+<pre><code class="language-make">$(addprefix build/,$(notdir $(SOURCES)))
+</code></pre>
+<p>The inner <code>notdir</code> writes its result into the buffer, and the outer <code>addprefix</code> continues processing the resulting text.</p>
+<h2>The <code>value</code> function: inspect without expanding</h2>
+<p>Most variable references interpret the variable’s value. The <code>value</code> function does not:</p>
+<pre><code class="language-make">A = $(B)
+B = hello
+
+$(info normal: $(A))
+$(info raw: $(value A))
+</code></pre>
+<p>The output is conceptually:</p>
+<pre><code class="language-text">normal: hello
+raw: $(B)
+</code></pre>
+<p>Its implementation looks up the variable and copies <code>v-&gt;value</code> directly:</p>
+<pre><code class="language-c">struct variable *v = lookup_variable
+  (argv[0], strlen (argv[0]));
+
+if (v)
+  o = variable_buffer_output (o, v-&gt;value,
+                              strlen (v-&gt;value));
+</code></pre>
+<p>This is useful when generating makefile text or inspecting whether a variable contains a literal reference.</p>
+<p>The contrast is:</p>
+<ul>
+<li><code>$(A)</code> means “evaluate A.”</li>
+<li><code>$(value A)</code> means “show me A’s stored text.”</li>
+</ul>
+<p>It is like the difference between asking a spreadsheet for a calculated cell and asking to view the formula behind that cell.</p>
+<h2>The <code>eval</code> function: expansion followed by parsing</h2>
+<p>The <code>eval</code> function makes expansion unusually powerful:</p>
+<pre><code class="language-make">define RULE
+$(1): $(2)
+	$(CC) -o $$@ $$^
+endef
+
+$(eval $(call RULE,app,main.o))
+</code></pre>
+<p>The text passed to <code>eval</code> is expanded first. Then it is treated as a new makefile fragment.</p>
+<p>The implementation temporarily installs a separate variable buffer:</p>
+<pre><code class="language-c">install_variable_buffer (&amp;buf, &amp;len);
+
+eval_buffer (argv[0], NULL);
+</code></pre>
+<p>After the parser processes the text, the old buffer is restored:</p>
+<pre><code class="language-c">restore_variable_buffer (buf, len);
+return o;
+</code></pre>
+<p><code>eval</code> always expands to an empty string. Its purpose is its side effect: it adds variables, rules, and recipes to Make’s internal database.</p>
+<p>Because the text is expanded once by the outer expression and then interpreted again as makefile syntax, dollar signs often need doubling. In the example above, <code>$$@</code> survives the first expansion as <code>$@</code>, allowing the generated recipe to use the automatic variable later.</p>
+<p>This is a two-stage printing process:</p>
+<ol>
+<li>Print a makefile fragment.</li>
+<li>Hand the printed fragment to the makefile parser.</li>
+<li>The parser records the new definitions.</li>
+</ol>
+<p>That connection reaches back to <a href="01_read_all_makefiles.html"><code>read_all_makefiles</code></a>: <code>eval_buffer()</code> reuses the same parser machinery that reads ordinary makefiles, but with an in-memory buffer instead of a file.</p>
+<h2>The <code>shell</code> function</h2>
+<p>The <code>shell</code> function sends a command to a child process:</p>
+<pre><code class="language-make">HOST := $(shell hostname)
+</code></pre>
+<p>The function implementation delegates to <code>func_shell_base()</code>:</p>
+<pre><code class="language-c">static char *
+func_shell (char *o, char **argv,
+            const char *funcname UNUSED)
+{
+  return func_shell_base (o, argv, 1);
+}
+</code></pre>
+<p><code>func_shell_base()</code>:</p>
+<ol>
+<li>Constructs an argument list for the configured shell.</li>
+<li>Builds an environment with <code>target_environment()</code>.</li>
+<li>Starts a child process.</li>
+<li>Reads the child’s output through a pipe.</li>
+<li>Converts newlines to spaces.</li>
+<li>Appends the result to the variable buffer.</li>
+</ol>
+<p>The environment construction is important. A shell function sees Make’s exported variables, including target-independent values and the current environment rules discussed in <a href="02_struct_variable.html"><code>struct variable</code></a>.</p>
+<p>The final newline is removed, while other newlines become spaces. Thus:</p>
+<pre><code class="language-make">TEXT := $(shell printf 'one\ntwo\n')
+</code></pre>
+<p>becomes approximately:</p>
+<pre><code class="language-text">one two
+</code></pre>
+<p>Shell execution is expensive and can introduce side effects. A shell command in a recursively expanded variable may run every time that variable is expanded:</p>
+<pre><code class="language-make">NOW = $(shell date +%s)
+</code></pre>
+<p>A simple variable runs it once while the assignment is read:</p>
+<pre><code class="language-make">NOW := $(shell date +%s)
+</code></pre>
+<p>The expansion engine therefore determines not only the text of a build, but also when external commands happen.</p>
+<h2>Shell status</h2>
+<p>When a shell function completes, <code>shell_completed()</code> records the exit status in the special variable <code>.SHELLSTATUS</code>:</p>
+<pre><code class="language-c">sprintf (buf, &quot;%d&quot;, exit_code);
+define_variable_cname (&quot;.SHELLSTATUS&quot;, buf,
+                      o_override, 0);
+</code></pre>
+<p>A makefile can inspect it:</p>
+<pre><code class="language-make">result := $(shell test -f config.h)
+status := $(.SHELLSTATUS)
+</code></pre>
+<p>This gives shell execution a small amount of structured feedback without changing the returned command output.</p>
+<h2>Expansion in a target context</h2>
+<p>Global expansion is not always enough. A recipe must see target-specific variables and automatic variables.</p>
+<p>For example:</p>
+<pre><code class="language-make">debug.o: CFLAGS += -DDEBUG
+
+debug.o:
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+</code></pre>
+<p><code>variable_expand_for_file()</code> temporarily switches the active variable set:</p>
+<pre><code class="language-c">savev = current_variable_set_list;
+current_variable_set_list = file-&gt;variables;
+</code></pre>
+<p>It also changes the source location used for diagnostics:</p>
+<pre><code class="language-c">savef = reading_file;
+if (file-&gt;cmds &amp;&amp; file-&gt;cmds-&gt;fileinfo.filenm)
+  reading_file = &amp;file-&gt;cmds-&gt;fileinfo;
+</code></pre>
+<p>Then it expands the recipe:</p>
+<pre><code class="language-c">result = variable_expand (line);
+</code></pre>
+<p>Finally, it restores the previous context:</p>
+<pre><code class="language-c">current_variable_set_list = savev;
+reading_file = savef;
+</code></pre>
+<p>This is like temporarily opening a target’s project folder before reading its instructions, then closing that folder when the recipe is finished.</p>
+<p>The target’s variable chain may include:</p>
+<ul>
+<li>target-specific variables,</li>
+<li>pattern-specific variables,</li>
+<li>inherited parent variables,</li>
+<li>global variables.</li>
+</ul>
+<p>The lookup order is managed by <code>current_variable_set_list</code>, which was introduced in <a href="02_struct_variable.html"><code>struct variable</code></a>.</p>
+<h2>Automatic variables</h2>
+<p>Before a recipe is expanded, <code>set_file_variables()</code> in <a href="../src/commands.c"><code>src/commands.c</code></a> creates automatic variables such as:</p>
+<ul>
+<li><code>$@</code>: the target name,</li>
+<li><code>$&lt;</code>: the first prerequisite,</li>
+<li><code>$^</code>: all distinct normal prerequisites,</li>
+<li><code>$+</code>: prerequisites including duplicates,</li>
+<li><code>$?</code>: prerequisites newer than the target,</li>
+<li><code>$*</code>: the implicit stem.</li>
+</ul>
+<p>For a target such as:</p>
+<pre><code class="language-make">build/app.o: src/app.c
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>the expansion context might contain:</p>
+<pre><code class="language-text">@ = build/app.o
+&lt; = src/app.c
+</code></pre>
+<p>The expansion engine treats these as ordinary one-character variable references. There is no separate <code>$@</code> parser hidden elsewhere; the automatic values are inserted into the same variable machinery.</p>
+<p>The recipe path is:</p>
+<pre><code class="language-text">target selected
+      ↓
+automatic variables defined
+      ↓
+target variable context activated
+      ↓
+recipe expanded
+      ↓
+shell command constructed
+      ↓
+child process started
+</code></pre>
+<p><code>new_job()</code> in <a href="../src/job.c"><code>src/job.c</code></a> expands each command line with:</p>
+<pre><code class="language-c">lines[i] = allocated_variable_expand_for_file
+  (cmds-&gt;command_lines[i], file);
+</code></pre>
+<p>Only after this expansion does Make pass the resulting command to <code>construct_command_argv()</code>.</p>
+<p>This explains why automatic variables are unavailable in many earlier contexts: the target information may not exist yet.</p>
+<h2>Expansion of prerequisites</h2>
+<p>Ordinary prerequisites are expanded while Make reads a rule:</p>
+<pre><code class="language-make">objects = main.o util.o
+
+app: $(objects)
+</code></pre>
+<p>The parser in <a href="../src/read.c"><code>src/read.c</code></a> expands the dependency text before <code>record_files()</code> stores it.</p>
+<p>If <code>.SECONDEXPANSION</code> is enabled, Make can defer some prerequisite expansion:</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+main.o: $$($$@_DEPS)
+</code></pre>
+<p>The first expansion preserves enough dollar signs for a later expansion. During dependency processing, <code>expand_deps()</code> in <a href="../src/file.c"><code>src/file.c</code></a> calls:</p>
+<pre><code class="language-c">p = variable_expand_for_file (d-&gt;name, f);
+</code></pre>
+<p>At that point, automatic variables and target-specific variables are available.</p>
+<p>This is a two-pass form of expansion:</p>
+<ol>
+<li>Read the rule and preserve deferred references.</li>
+<li>Later, after the target and its stem are known, expand them in the target context.</li>
+</ol>
+<p>It resembles filling out a form in two stages: first record placeholders, then complete them when the missing target information is available.</p>
+<h2>Expansion of makefile names</h2>
+<p>Expansion is also used before parsing begins. <code>read_all_makefiles()</code> expands the <code>MAKEFILES</code> variable:</p>
+<pre><code class="language-c">value = allocated_variable_expand (&quot;$(MAKEFILES)&quot;);
+</code></pre>
+<p>The parser expands <code>include</code> arguments in the same way:</p>
+<pre><code class="language-c">p = allocated_variable_expand (p2);
+</code></pre>
+<p>This allows:</p>
+<pre><code class="language-make">include config/$(HOST).mk
+</code></pre>
+<p>to select a platform-specific makefile.</p>
+<p>The resulting filename list is parsed by <code>parse_file_seq()</code>, and each file is passed back to <code>eval_makefile()</code>. The expansion engine therefore helps determine which input documents the parser will read, while the parser supplies the definitions that later expansions use.</p>
+<h2>Expansion and environments</h2>
+<p>When Make prepares an environment for a recipe or a <code>shell</code> function, <code>target_environment()</code> walks the visible variable sets.</p>
+<p>Recursive variables are expanded before becoming environment strings:</p>
+<pre><code class="language-c">if (v-&gt;recursive
+    &amp;&amp; (v-&gt;origin != o_env
+        &amp;&amp; v-&gt;origin != o_env_override))
+  value = cp = recursively_expand_for_file (v, file);
+</code></pre>
+<p>The result is formatted as:</p>
+<pre><code class="language-text">NAME=value
+</code></pre>
+<p>and passed to the child process.</p>
+<p>Environment variables originally imported from the operating system are generally preserved without recursive re-expansion. This avoids unexpectedly changing an environment value merely because it contains a dollar sign.</p>
+<p>The result is a clear boundary:</p>
+<pre><code class="language-text">Make variable records
+        ↓ expansion
+environment strings
+        ↓ process creation
+child process variables
+</code></pre>
+<p>A child process never receives a pointer to <code>struct variable</code>. It receives a snapshot of expanded text.</p>
+<h2>Error locations during expansion</h2>
+<p>Expansion errors need a source location. For example:</p>
+<pre><code class="language-make">BROKEN = $(UNFINISHED
+</code></pre>
+<p>can produce an “unterminated variable reference” diagnostic.</p>
+<p>The global pointer <code>expanding_var</code> points to the location that should be reported:</p>
+<pre><code class="language-c">const floc **expanding_var = &amp;reading_file;
+</code></pre>
+<p>While recursively expanding a variable with recorded file information, Make temporarily points diagnostics at that variable:</p>
+<pre><code class="language-c">if (v-&gt;fileinfo.filenm)
+  {
+    this_var = &amp;v-&gt;fileinfo;
+    expanding_var = &amp;this_var;
+  }
+</code></pre>
+<p>This lets Make distinguish between:</p>
+<ul>
+<li>an error in the current makefile line,</li>
+<li>an error in a variable definition from another file,</li>
+<li>an error while expanding a recipe.</li>
+</ul>
+<p>The source-location information comes from the file-reading and variable-definition paths described in <a href="01_read_all_makefiles.html"><code>read_all_makefiles</code></a> and <a href="02_struct_variable.html"><code>struct variable</code></a>.</p>
+<h2>Common expansion examples</h2>
+<h3>Recursive versus simple assignment</h3>
+<pre><code class="language-make">A = $(B)
+B = later
+</code></pre>
+<p><code>$(A)</code> becomes <code>later</code> because <code>A</code> is recursive.</p>
+<pre><code class="language-make">A := $(B)
+B = later
+</code></pre>
+<p><code>$(A)</code> remains empty because <code>B</code> was empty when <code>A</code> was assigned.</p>
+<h3>Escaping a dollar sign</h3>
+<pre><code class="language-make">show:
+	echo $$HOME
+</code></pre>
+<p>Make passes <code>$HOME</code> to the shell. The shell, not Make, expands <code>HOME</code>.</p>
+<h3>Function nesting</h3>
+<pre><code class="language-make">src = main.c util.c
+obj = $(patsubst %.c,%.o,$(src))
+</code></pre>
+<p>The inner <code>$(src)</code> expands first. Then <code>patsubst</code> transforms the resulting word list.</p>
+<h3>Target-specific expansion</h3>
+<pre><code class="language-make">app: CFLAGS += -DAPP
+app:
+	echo $(CFLAGS)
+</code></pre>
+<p>The recipe sees the target-specific value because it is expanded with <code>app</code>’s variable context.</p>
+<h3>Shell output</h3>
+<pre><code class="language-make">version := $(shell printf '1.2\n')
+</code></pre>
+<p>The command runs while the assignment is read, and the trailing newline is removed.</p>
+<h2>A compact mental model</h2>
+<p>You can remember <code>variable_expand</code> as a clerk translating shorthand on a work order:</p>
+<ol>
+<li>Copy ordinary text directly.</li>
+<li>When the clerk sees <code>$</code>, inspect what follows.</li>
+<li>For <code>$$</code>, print one dollar sign.</li>
+<li>For <code>$x</code>, look up one-character variable <code>x</code>.</li>
+<li>For <code>$(name)</code>, expand the named variable.</li>
+<li>For nested names, expand the name first.</li>
+<li>For function names, split arguments and call the registered implementation.</li>
+<li>For substitution references, transform the variable’s words.</li>
+<li>For recursive values, expand again while detecting cycles.</li>
+<li>For target recipes, use the target’s variable and automatic-variable context.</li>
+<li>For <code>shell</code>, create a child process and capture its output.</li>
+<li>Write everything into the reusable variable buffer.</li>
+</ol>
+<p>The key distinction is timing:</p>
+<pre><code class="language-text">simple value       already concrete
+recursive value    expression evaluated when used
+target recipe      evaluated with target context
+second expansion   evaluated later with automatic variables
+shell function     evaluated by an external process
+</code></pre>
+<h2>Key takeaways</h2>
+<ul>
+<li><code>variable_expand()</code> is the public entry point for ordinary expansion.</li>
+<li><code>variable_expand_string()</code> performs the left-to-right scan.</li>
+<li>Results are normally written into the reusable <code>variable_buffer</code>.</li>
+<li>The returned buffer is temporary; allocating wrappers preserve results.</li>
+<li>Variable references use <code>lookup_variable()</code> and respect the active scope.</li>
+<li>Recursive variables are expanded when referenced and protected against cycles.</li>
+<li>Nested variable names are expanded before the final lookup.</li>
+<li>Substitution references use the pattern-substitution machinery.</li>
+<li>Built-in functions are found through a hash table and dispatched by <code>handle_function()</code>.</li>
+<li>Functions such as <code>if</code>, <code>foreach</code>, <code>eval</code>, and <code>shell</code> control when further expansion occurs.</li>
+<li><code>eval</code> expands text and then feeds it back to the makefile parser.</li>
+<li><code>shell</code> runs a child process, captures output, and updates <code>.SHELLSTATUS</code>.</li>
+<li>Target recipes use <code>variable_expand_for_file()</code> so target-specific and automatic variables are visible.</li>
+<li>Prerequisites can be expanded a second time after the target context is known.</li>
+<li>Exported recursive variables are expanded before Make builds a child environment.</li>
+</ul>
+<p>Now that you understand how symbolic text becomes concrete strings, the next question is where those strings attach to targets, timestamps, recipes, and variable contexts. That is the subject of <a href="04_struct_file.html">struct file</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="02_struct_variable.html">&larr; struct variable</a></span>
+    <span><a href="04_struct_file.html">struct file &rarr;</a></span>
+  </nav>
+</body>
+</html>

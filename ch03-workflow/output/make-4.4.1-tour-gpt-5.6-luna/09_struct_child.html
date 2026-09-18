@@ -1,0 +1,942 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>struct child — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 9: struct child</h1>
+<p>What happens after Make decides that <code>app</code> must be rebuilt?</p>
+<p>The recipe has already been read, split, and expanded:</p>
+<pre><code class="language-text">cc -o app main.o util.o
+</code></pre>
+<p>But Make still needs to:</p>
+<ul>
+<li>start a subprocess;</li>
+<li>remember its process ID;</li>
+<li>capture its output;</li>
+<li>know which target the process belongs to;</li>
+<li>decide whether errors should be ignored;</li>
+<li>start the next recipe line when this one finishes;</li>
+<li>and report success or failure back to the target.</li>
+</ul>
+<p>This is the job of <code>struct child</code>.</p>
+<blockquote>
+<p><strong>Description:</strong> A struct child represents a running or recently completed subprocess used to execute a recipe. It tracks the target, process ID, environment, command position, output handling, and failure state. Think of it as a delivery runner carrying out one recipe while Make coordinates other runners and collects results.</p>
+</blockquote>
+<p>The previous chapter explained how <a href="08_struct_commands.html"><code>struct commands</code></a> stores a reusable recipe and turns it into expanded command lines. This chapter follows those expanded lines into the job system.</p>
+<h2>Where <code>struct child</code> fits</h2>
+<p>The structure is declared in <a href="../src/job.h"><code>src/job.h</code></a>:</p>
+<pre><code class="language-c">struct child
+  {
+    CHILDBASE;
+
+    struct child *next;
+    struct file *file;
+</code></pre>
+<p>The remaining fields are:</p>
+<pre><code class="language-c">    char *sh_batch_file;
+    char **command_lines;
+    char *command_ptr;
+    unsigned int command_line;
+    pid_t pid;
+</code></pre>
+<p>And finally:</p>
+<pre><code class="language-c">    unsigned int remote:1;
+    unsigned int noerror:1;
+    unsigned int good_stdin:1;
+    unsigned int deleted:1;
+    unsigned int recursive:1;
+    unsigned int jobslot:1;
+    unsigned int dontcare:1;
+  };
+</code></pre>
+<p>The structure combines three kinds of information:</p>
+<ol>
+<li>
+<p><strong>What is being built?</strong><br />
+The <code>file</code> pointer identifies the target.</p>
+</li>
+<li>
+<p><strong>What process is running?</strong><br />
+The <code>pid</code>, <code>remote</code>, and process-related fields describe execution.</p>
+</li>
+<li>
+<p><strong>What remains to do?</strong><br />
+The command-line pointers identify the current and future recipe lines.</p>
+</li>
+</ol>
+<p>A useful picture is a delivery runner carrying a work order:</p>
+<pre><code class="language-text">runner
+ ├── destination: target file
+ ├── current package: expanded command line
+ ├── route number: process ID
+ ├── status flags: silent, recursive, ignore errors
+ └── return report: exit status and output
+</code></pre>
+<h2>The shared <code>CHILDBASE</code></h2>
+<p>The first part of <code>struct child</code> comes from the <code>CHILDBASE</code> macro:</p>
+<pre><code class="language-c">#define CHILDBASE                                               \
+    char *cmd_name;       /* Allocated copy of command run.  */ \
+    char **environment;   /* Environment for commands. */       \
+    VMSCHILD                                                    \
+    struct output output
+</code></pre>
+<p>This macro is also used by <code>struct childbase</code>:</p>
+<pre><code class="language-c">struct childbase
+  {
+    CHILDBASE;
+  };
+</code></pre>
+<p>Why have two related structures?</p>
+<p>Some code needs only the common process information. For example, the platform-specific launcher receives:</p>
+<pre><code class="language-c">pid_t child_execute_job (struct childbase *child,
+                         int good_stdin, char **argv);
+</code></pre>
+<p>It does not need the full Make scheduling state. It only needs:</p>
+<ul>
+<li>the environment;</li>
+<li>output destinations;</li>
+<li>the command name;</li>
+<li>and, on VMS, additional launch details.</li>
+</ul>
+<p>The full <code>struct child</code> adds Make-specific information around that common base.</p>
+<p>This is like having:</p>
+<pre><code class="language-text">basic delivery form:
+  package, address, carrier instructions
+
+full delivery record:
+  basic form + route progress + warehouse status
+</code></pre>
+<p>The launcher needs the basic form. Make’s scheduler needs the complete record.</p>
+<h2>The child chain</h2>
+<p>Live and recently created children are linked through:</p>
+<pre><code class="language-c">struct child *children = 0;
+</code></pre>
+<p>Each child points to the next:</p>
+<pre><code class="language-c">struct child *next;
+</code></pre>
+<p>The chain looks like:</p>
+<pre><code class="language-text">children
+   |
+   v
+child for app -&gt; child for tests -&gt; child for docs -&gt; NULL
+</code></pre>
+<p>This list is the job system’s active clipboard. When Make needs to reap a completed process, it searches the chain for the matching process ID.</p>
+<p>The global count records how many local or remote job slots are currently occupied:</p>
+<pre><code class="language-c">unsigned int job_slots_used = 0;
+</code></pre>
+<p>There is also a separate chain for children waiting because the load average is too high:</p>
+<pre><code class="language-c">static struct child *waiting_jobs = 0;
+</code></pre>
+<p>So a child can be in one of two practical queues:</p>
+<pre><code class="language-text">ready or running:
+  children
+
+created but waiting to start:
+  waiting_jobs
+</code></pre>
+<p>This is similar to an airport:</p>
+<ul>
+<li>passengers already assigned to gates are in the active list;</li>
+<li>passengers waiting for a gate are in the waiting list.</li>
+</ul>
+<h2>The target pointer</h2>
+<p>Every child points back to the target it is building:</p>
+<pre><code class="language-c">struct file *file;
+</code></pre>
+<p>The target is the <code>struct file</code> record described in <a href="04_struct_file.html">struct file</a>. Through this pointer, the child can access:</p>
+<ul>
+<li>the target name;</li>
+<li>the recipe record;</li>
+<li>prerequisites;</li>
+<li>target-specific variables;</li>
+<li>update status;</li>
+<li>grouped peer targets;</li>
+<li>and source-location information.</li>
+</ul>
+<p>For example:</p>
+<pre><code class="language-text">child-&gt;file-&gt;name
+</code></pre>
+<p>might be:</p>
+<pre><code class="language-text">app
+</code></pre>
+<p>The target record is the permanent project card. The child is temporary execution state attached to that card.</p>
+<p>This distinction matters because several different children may execute different recipe lines over the lifetime of one target, while the target’s <code>struct file</code> remains the central record.</p>
+<h2>Creating a child</h2>
+<p>The process begins in <code>new_job()</code> in <a href="../src/job.c"><code>src/job.c</code></a>.</p>
+<p>The function receives a target:</p>
+<pre><code class="language-c">void
+new_job (struct file *file)
+{
+  struct commands *cmds = file-&gt;cmds;
+  struct child *c;
+</code></pre>
+<p>It first makes sure the recipe has been split:</p>
+<pre><code class="language-c">  chop_commands (cmds);
+</code></pre>
+<p>Then it allocates a zero-filled child:</p>
+<pre><code class="language-c">  c = xcalloc (sizeof (struct child));
+  output_init (&amp;c-&gt;output);
+
+  c-&gt;file = file;
+</code></pre>
+<p>At this point the child has:</p>
+<ul>
+<li>a target;</li>
+<li>an output record;</li>
+<li>empty process state;</li>
+<li>no command lines of its own yet.</li>
+</ul>
+<p>The recipe template belongs to <code>struct commands</code>. The child receives its own expanded copy of those lines.</p>
+<h2>Expanding commands for this child</h2>
+<p>The command record stores reusable text such as:</p>
+<pre><code class="language-make">$(CC) -o $@ $^
+</code></pre>
+<p><code>new_job()</code> creates a separate array:</p>
+<pre><code class="language-c">lines = xmalloc (cmds-&gt;ncommand_lines * sizeof (char *));
+</code></pre>
+<p>It expands each line using the target context:</p>
+<pre><code class="language-c">for (i = 0; i &lt; cmds-&gt;ncommand_lines; ++i)
+  lines[i] = allocated_variable_expand_for_file
+    (cmds-&gt;command_lines[i], file);
+</code></pre>
+<p>This is the expansion path explained in <a href="03_variable_expand.html">variable_expand</a>. The target argument makes values such as these available:</p>
+<pre><code class="language-text">CC = cc
+@  = app
+^  = main.o util.o
+</code></pre>
+<p>The child’s private lines might become:</p>
+<pre><code class="language-text">echo Linking app
+cc -o app main.o util.o
+</code></pre>
+<p>Then they are stored:</p>
+<pre><code class="language-c">  c-&gt;command_lines = lines;
+</code></pre>
+<p>The ownership boundary is important:</p>
+<pre><code class="language-text">struct commands:
+  original reusable recipe
+
+struct child:
+  expanded recipe for one target execution
+</code></pre>
+<p>If two targets share the same pattern-rule recipe, they still receive separate expanded command arrays. Their <code>$@</code>, <code>$&lt;</code>, and target-specific variables may differ.</p>
+<h2>The command cursor</h2>
+<p>Two fields tell the child where it is in the recipe:</p>
+<pre><code class="language-c">unsigned int command_line;
+char *command_ptr;
+</code></pre>
+<p><code>command_line</code> identifies the next entry in the expanded array. <code>command_ptr</code> points into the currently active command.</p>
+<p>The helper <code>job_next_command()</code> advances through empty lines:</p>
+<pre><code class="language-c">while (child-&gt;command_ptr == 0
+       || *child-&gt;command_ptr == '\0')
+  {
+    if (child-&gt;command_line
+        == child-&gt;file-&gt;cmds-&gt;ncommand_lines)
+</code></pre>
+<p>When it reaches the end, it clears the pointer:</p>
+<pre><code class="language-c">      child-&gt;command_ptr = 0;
+      return 0;
+</code></pre>
+<p>Otherwise, it selects the next line:</p>
+<pre><code class="language-c">    child-&gt;command_ptr =
+      child-&gt;command_lines[child-&gt;command_line++];
+</code></pre>
+<p>The child therefore behaves like a bookmark in a book:</p>
+<pre><code class="language-text">recipe lines:
+  line 0: echo Linking app
+  line 1: cc -o app main.o util.o
+
+bookmark:
+  currently reading line 1
+</code></pre>
+<p>After the shell finishes line 0, Make advances the bookmark and starts line 1.</p>
+<p>With <code>.ONESHELL</code>, explained in <a href="08_struct_commands.html">struct commands</a>, the entire recipe is usually represented as one logical command line. Without <code>.ONESHELL</code>, each logical recipe line can require its own subprocess.</p>
+<h2>Starting the child</h2>
+<p>After expansion, <code>new_job()</code> prepares the first command:</p>
+<pre><code class="language-c">job_next_command (c);
+</code></pre>
+<p>It then waits for a job slot if necessary. With ordinary <code>-j</code> parallelism, the limit comes from <code>job_slots</code>. With the jobserver, Make obtains a token.</p>
+<p>Finally, it calls:</p>
+<pre><code class="language-c">start_waiting_job (c);
+</code></pre>
+<p>Despite its name, this function can start the child immediately or place it on <code>waiting_jobs</code>.</p>
+<p>It first asks whether remote execution is available:</p>
+<pre><code class="language-c">c-&gt;remote = start_remote_job_p (1);
+</code></pre>
+<p>Then it checks the load average:</p>
+<pre><code class="language-c">if (!c-&gt;remote
+    &amp;&amp; ((job_slots_used &gt; 0 &amp;&amp; load_too_high ())
+#ifdef WINDOWS32
+        || process_table_full ()
+#endif
+        ))
+</code></pre>
+<p>If the machine is too busy, the child is placed on the waiting list:</p>
+<pre><code class="language-c">c-&gt;next = waiting_jobs;
+waiting_jobs = c;
+return 0;
+</code></pre>
+<p>The target is marked as running even though its process has not started yet:</p>
+<pre><code class="language-c">set_command_state (f, cs_running);
+</code></pre>
+<p>This distinction allows Make to reserve the target’s place in the schedule while waiting for a suitable execution slot.</p>
+<h2>One process from start to finish</h2>
+<p>The main execution sequence looks like this:</p>
+<pre class="mermaid">sequenceDiagram
+    participant Update as Update engine
+    participant Child as Child record
+    participant Launcher as Process launcher
+    participant Process as Recipe process
+    participant Reaper as Completion handler
+
+    Update->>Child: Create target execution record
+    Child->>Launcher: Provide command and environment
+    Launcher->>Process: Start local or remote process
+    Process-->>Reaper: Return exit status and output
+    Reaper->>Child: Advance or finish command sequence
+    Reaper->>Update: Report target result
+</pre>
+<p>The child record remains the connection point between scheduling and process management.</p>
+<h2>Launching a command</h2>
+<p>When a child is ready, <code>start_job_command()</code> prepares the actual process.</p>
+<p>It combines target-wide and per-line flags:</p>
+<pre><code class="language-c">flags = (child-&gt;file-&gt;command_flags
+         | child-&gt;file-&gt;cmds-&gt;lines_flags[
+             child-&gt;command_line - 1]);
+</code></pre>
+<p>It records whether errors should be ignored:</p>
+<pre><code class="language-c">child-&gt;noerror = ANY_SET (flags, COMMANDS_NOERROR);
+</code></pre>
+<p>It also scans the expanded command for prefixes that may have appeared through variable expansion:</p>
+<pre><code class="language-c">while (*p != '\0')
+  {
+    if (*p == '@')
+      flags |= COMMANDS_SILENT;
+    else if (*p == '+')
+      flags |= COMMANDS_RECURSE;
+</code></pre>
+<p>The final recursive status is stored in:</p>
+<pre><code class="language-c">child-&gt;recursive = ANY_SET (flags, COMMANDS_RECURSE);
+</code></pre>
+<p>This connects directly to the recipe flags described in <a href="08_struct_commands.html">struct commands</a>:</p>
+<ul>
+<li><code>@</code> suppresses command echoing;</li>
+<li><code>-</code> allows an error;</li>
+<li><code>+</code> marks a recursive Make command.</li>
+</ul>
+<h2>Building the argument vector</h2>
+<p>The expanded command text is passed to:</p>
+<pre><code class="language-c">argv = construct_command_argv
+  (p, &amp;end, child-&gt;file,
+   child-&gt;file-&gt;cmds-&gt;lines_flags[
+     child-&gt;command_line - 1],
+   &amp;child-&gt;sh_batch_file);
+</code></pre>
+<p><code>construct_command_argv()</code> decides whether the command can be run directly or needs a shell.</p>
+<p>For example:</p>
+<pre><code class="language-text">cc -c main.c -o main.o
+</code></pre>
+<p>may be converted directly into an argument vector:</p>
+<pre><code class="language-text">argv[0] = &quot;cc&quot;
+argv[1] = &quot;-c&quot;
+argv[2] = &quot;main.c&quot;
+</code></pre>
+<p>But a command containing shell syntax such as:</p>
+<pre><code class="language-text">echo &quot;$HOME&quot; &gt; output
+</code></pre>
+<p>must be sent through the configured shell.</p>
+<p>The target is passed to <code>construct_command_argv()</code> so Make can expand:</p>
+<ul>
+<li><code>SHELL</code>;</li>
+<li><code>.SHELLFLAGS</code>;</li>
+<li><code>IFS</code>;</li>
+<li>and target-specific values.</li>
+</ul>
+<p>On Windows, <code>sh_batch_file</code> may receive the name of a temporary batch or shell script. The child owns that filename until the process finishes.</p>
+<h2>The process ID</h2>
+<p>The <code>pid</code> field identifies the launched process:</p>
+<pre><code class="language-c">pid_t pid;
+</code></pre>
+<p>On Unix-like systems, <code>child_execute_job()</code> uses <code>vfork()</code> or <code>posix_spawn()</code> and returns a process ID.</p>
+<p>The child is then linked into the active chain:</p>
+<pre><code class="language-c">c-&gt;next = children;
+children = c;
+</code></pre>
+<p>If the process was successfully started, Make increments the active job count:</p>
+<pre><code class="language-c">++job_slots_used;
+c-&gt;jobslot = 1;
+</code></pre>
+<p>The <code>pid</code> is the address on the delivery envelope. When the operating system reports that a process has ended, Make searches <code>children</code> for the record with the matching ID.</p>
+<p>A special value is also meaningful:</p>
+<pre><code class="language-text">pid &lt; 0
+</code></pre>
+<p>This indicates that the process never successfully started. <code>reap_children()</code> treats it like a command-not-found failure with exit code 127.</p>
+<h2>Local and remote execution</h2>
+<p>The <code>remote</code> bit says whether the child is being executed through the remote job interface:</p>
+<pre><code class="language-c">unsigned int remote:1;
+</code></pre>
+<p>The normal path is local:</p>
+<pre><code class="language-c">child-&gt;pid = child_execute_job
+  ((struct childbase *) child, child-&gt;good_stdin, argv);
+</code></pre>
+<p>If remote execution is selected, Make calls:</p>
+<pre><code class="language-c">start_remote_job (argv, child-&gt;environment,
+                  child-&gt;good_stdin ? 0 : get_bad_stdin (),
+                  &amp;is_remote, &amp;id, &amp;used_stdin);
+</code></pre>
+<p>The rest of Make still uses the same <code>struct child</code> record. Only the launcher and status-retrieval functions differ.</p>
+<p>This is like a delivery company using either:</p>
+<ul>
+<li>its own van;</li>
+<li>or a partner courier.</li>
+</ul>
+<p>The tracking form stays the same. The transport mechanism changes.</p>
+<h2>The environment field</h2>
+<p>The child’s environment is stored in:</p>
+<pre><code class="language-c">char **environment;
+</code></pre>
+<p><code>new_job()</code> does not build this environment until it is needed. <code>start_job_command()</code> eventually calls:</p>
+<pre><code class="language-c">child-&gt;environment = target_environment
+  (child-&gt;file, child-&gt;file-&gt;cmds-&gt;any_recurse);
+</code></pre>
+<p>The environment builder is described in <a href="02_struct_variable.html">struct variable</a>. It collects visible exported variables, expands recursive values, and creates strings such as:</p>
+<pre><code class="language-text">CC=cc
+MAKELEVEL=1
+MAKEFLAGS=-j4
+</code></pre>
+<p>For a recursive Make command, the environment also carries jobserver information so the child Make can share the parallel job pool.</p>
+<p>The environment is a snapshot. Changing a Make variable after the child starts cannot change the environment already passed to that process.</p>
+<h2>Standard input</h2>
+<p>Only one child generally receives Make’s “good” standard input:</p>
+<pre><code class="language-c">unsigned int good_stdin:1;
+</code></pre>
+<p>Before launching, the child claims it:</p>
+<pre><code class="language-c">child-&gt;good_stdin = !good_stdin_used;
+if (child-&gt;good_stdin)
+  good_stdin_used = 1;
+</code></pre>
+<p>Other parallel children receive a deliberately unusable input descriptor from:</p>
+<pre><code class="language-c">get_bad_stdin ()
+</code></pre>
+<p>This prevents several simultaneous recipes from competing for the terminal or for the parent’s input stream.</p>
+<p>Think of standard input as one telephone handset. Make allows one runner to use it, while other runners receive a disconnected handset so they cannot accidentally interfere.</p>
+<p>When a child finishes, <code>reap_children()</code> releases the resource:</p>
+<pre><code class="language-c">if (c-&gt;good_stdin)
+  good_stdin_used = 0;
+</code></pre>
+<h2>Output handling</h2>
+<p>The <code>CHILDBASE</code> portion contains:</p>
+<pre><code class="language-c">struct output output;
+</code></pre>
+<p>This record supports output synchronization modes such as:</p>
+<pre><code class="language-sh">make -Otarget -j4
+</code></pre>
+<p>Each child can collect output in its own buffer or file. When the child finishes, Make dumps the output as one unit:</p>
+<pre><code class="language-c">output_dump (&amp;c-&gt;output);
+</code></pre>
+<p>Without synchronization, parallel jobs can interleave output:</p>
+<pre><code class="language-text">compile main.c
+linking app
+compile util.c
+</code></pre>
+<p>With target synchronization, Make tries to display each target’s output together:</p>
+<pre><code class="language-text">compile main.c
+compile util.c
+linking app
+</code></pre>
+<p>The child is therefore not only a process tracker. It is also the owner of that process’s output context.</p>
+<h2>Recursive commands</h2>
+<p>The <code>recursive</code> bit records whether the current command invokes another Make:</p>
+<pre><code class="language-c">unsigned int recursive:1;
+</code></pre>
+<p>A command becomes recursive through:</p>
+<pre><code class="language-make">	+$(MAKE) -C subdir
+</code></pre>
+<p>or:</p>
+<pre><code class="language-make">	$(MAKE) -C subdir
+</code></pre>
+<p><code>chop_commands()</code> detects explicit <code>+</code> prefixes and references to <code>$(MAKE)</code>. <code>start_job_command()</code> checks again after expansion because a variable might produce the recursive marker.</p>
+<p>Recursive commands receive special treatment:</p>
+<ul>
+<li>they may run under <code>-n</code>;</li>
+<li>they inherit jobserver descriptors when appropriate;</li>
+<li>their exit status can have special meaning under <code>-q</code>;</li>
+<li>and their environment includes Make coordination variables.</li>
+</ul>
+<p>The jobserver handoff is explicit:</p>
+<pre><code class="language-c">jobserver_pre_child (ANY_SET (flags, COMMANDS_RECURSE));
+child-&gt;pid = child_execute_job (...);
+jobserver_post_child (ANY_SET (flags, COMMANDS_RECURSE));
+</code></pre>
+<p>For a pipe-based jobserver, <code>jobserver_pre_child()</code> makes the descriptors inheritable. After the process is started, <code>jobserver_post_child()</code> restores the close-on-exec setting in the parent.</p>
+<h2>Ignoring errors</h2>
+<p>The <code>noerror</code> bit comes from the recipe prefix <code>-</code> or from <code>.IGNORE</code>:</p>
+<pre><code class="language-c">unsigned int noerror:1;
+</code></pre>
+<p>When the process exits unsuccessfully, <code>reap_children()</code> checks:</p>
+<pre><code class="language-c">if (child_failed &amp;&amp; !c-&gt;noerror &amp;&amp; !ignore_errors_flag)
+  {
+    child_error (c, exit_code, exit_sig,
+                 coredump, 0);
+</code></pre>
+<p>If <code>noerror</code> is set, Make still reports the problem when appropriate, but treats it as ignored and continues with the recipe or build.</p>
+<p>This is different from pretending the process succeeded at the operating-system level. The child still failed; Make simply applies a policy saying that this failure is not fatal.</p>
+<h2>The <code>dontcare</code> snapshot</h2>
+<p>The child stores:</p>
+<pre><code class="language-c">unsigned int dontcare:1;
+</code></pre>
+<p><code>new_job()</code> copies the target’s current <code>dontcare</code> state:</p>
+<pre><code class="language-c">c-&gt;dontcare = file-&gt;dontcare;
+</code></pre>
+<p>This is especially important while Make rebuilds makefiles. A missing optional included makefile may be marked “do not complain,” but that state can change as Make moves through the dependency graph.</p>
+<p>The child keeps a snapshot so that later failure handling uses the policy that applied when the job was created.</p>
+<p>This is like writing the delivery instructions onto the runner’s clipboard rather than repeatedly asking the changing central schedule what to do.</p>
+<h2>Reaping a completed child</h2>
+<p>Make does not continuously wait inside each target. Instead, the main update loop calls:</p>
+<pre><code class="language-c">reap_children (last_cmd_count == command_count, 0);
+</code></pre>
+<p>The <code>reap_children()</code> function waits for completed local or remote processes.</p>
+<p>It first finds a process that has ended. For local processes, it uses <code>wait()</code> or <code>waitpid()</code>:</p>
+<pre><code class="language-c">pid = WAIT_NOHANG (&amp;status);
+</code></pre>
+<p>When a process is found, Make extracts:</p>
+<pre><code class="language-text">exit code
+exit signal
+core-dump status
+</code></pre>
+<p>It then searches the child chain:</p>
+<pre><code class="language-c">for (c = children; c != 0; lastc = c, c = c-&gt;next)
+  if (c-&gt;pid == pid &amp;&amp; c-&gt;remote == remote)
+    break;
+</code></pre>
+<p>This is why the child record must retain both <code>pid</code> and <code>remote</code>: the same numeric process identifier may need to be interpreted through different execution backends.</p>
+<h2>Determining success or failure</h2>
+<p>The exit result is mapped to Make’s status values:</p>
+<pre><code class="language-c">if (exit_sig == 0 &amp;&amp; exit_code == 0)
+  child_failed = MAKE_SUCCESS;
+else
+  child_failed = MAKE_FAILURE;
+</code></pre>
+<p>Question mode has a special case for recursive commands:</p>
+<pre><code class="language-c">else if (exit_sig == 0 &amp;&amp; exit_code == 1
+         &amp;&amp; question_flag &amp;&amp; c-&gt;recursive)
+  child_failed = MAKE_TROUBLE;
+</code></pre>
+<p>The result is stored on the target:</p>
+<pre><code class="language-c">c-&gt;file-&gt;update_status =
+  child_failed == MAKE_FAILURE ? us_failed : us_question;
+</code></pre>
+<p>The target’s final status is therefore not stored permanently in <code>struct child</code>. The child reports the result back to <code>struct file</code>, which remains the authoritative project record.</p>
+<h2>Starting the next recipe line</h2>
+<p>If the command succeeded and more recipe lines remain, <code>reap_children()</code> advances the cursor:</p>
+<pre><code class="language-c">if (job_next_command (c))
+  {
+    start_job_command (c);
+    continue;
+  }
+</code></pre>
+<p>The same child record continues to represent the target’s execution sequence. It does not allocate a new <code>struct child</code> for every recipe line.</p>
+<p>The sequence is:</p>
+<pre><code class="language-text">child starts line 0
+        ↓
+line 0 exits successfully
+        ↓
+command_ptr advances
+        ↓
+child starts line 1
+        ↓
+line 1 exits successfully
+        ↓
+recipe is complete
+</code></pre>
+<p>This is like one courier carrying a multi-stop route. Finishing one stop does not create a new courier; the route marker simply advances.</p>
+<h2>Completing the target</h2>
+<p>When no command lines remain:</p>
+<pre><code class="language-c">else
+  c-&gt;file-&gt;update_status = us_success;
+</code></pre>
+<p>Make then calls:</p>
+<pre><code class="language-c">notice_finished_file (c-&gt;file);
+</code></pre>
+<p>That function belongs to the target-update machinery described in <a href="07_update_goal_chain.html">update_goal_chain</a>. It:</p>
+<ul>
+<li>sets <code>command_state</code> to <code>cs_finished</code>;</li>
+<li>marks the target as updated;</li>
+<li>refreshes timestamp information;</li>
+<li>handles <code>-t</code>;</li>
+<li>propagates status to grouped targets;</li>
+<li>and checks peer outputs.</li>
+</ul>
+<p>The child has completed its temporary role. The result now belongs to the target’s <code>struct file</code>.</p>
+<h2>Grouped targets</h2>
+<p>A single recipe can produce multiple outputs:</p>
+<pre><code class="language-make">program program.map &amp;: main.o
+	ld -o program main.o
+</code></pre>
+<p>The target’s <code>also_make</code> chain records the peers. When the child finishes, <code>notice_finished_file()</code> propagates the result:</p>
+<pre><code class="language-c">for (d = file-&gt;also_make; d != 0; d = d-&gt;next)
+  {
+    d-&gt;file-&gt;command_state = cs_finished;
+    d-&gt;file-&gt;updated = 1;
+</code></pre>
+<p>It also copies the update status:</p>
+<pre><code class="language-c">    d-&gt;file-&gt;update_status = file-&gt;update_status;
+  }
+</code></pre>
+<p>If the recipe succeeds but a peer output is still missing, Make can warn:</p>
+<pre><code class="language-text">warning: pattern recipe did not update peer target
+</code></pre>
+<p>The child represents the one recipe invocation. The <code>also_make</code> records represent every target that invocation promised to produce.</p>
+<h2>Deleting targets after interruption</h2>
+<p>If a command is interrupted, Make may remove targets that were partially written. The child tracks whether this has already happened:</p>
+<pre><code class="language-c">unsigned int deleted:1;
+</code></pre>
+<p>The cleanup function is:</p>
+<pre><code class="language-c">void
+delete_child_targets (struct child *child)
+{
+  if (child-&gt;deleted || child-&gt;pid &lt; 0)
+    return;
+</code></pre>
+<p>It deletes the main target:</p>
+<pre><code class="language-c">  delete_target (child-&gt;file, NULL);
+</code></pre>
+<p>Then it deletes grouped peers:</p>
+<pre><code class="language-c">  for (d = child-&gt;file-&gt;also_make; d != 0; d = d-&gt;next)
+    delete_target (d-&gt;file, child-&gt;file-&gt;name);
+</code></pre>
+<p>Finally:</p>
+<pre><code class="language-c">  child-&gt;deleted = 1;
+</code></pre>
+<p>The flag prevents repeated cleanup if several error paths handle the same child.</p>
+<p>Precious and phony targets are protected by <code>delete_target()</code>. This connects child cleanup to the special target flags stored in <code>struct file</code>.</p>
+<h2>Signals and fatal cleanup</h2>
+<p>When Make receives <code>SIGINT</code>, <code>SIGTERM</code>, or a similar signal, <code>fatal_error_signal()</code> walks the active children:</p>
+<pre><code class="language-c">for (c = children; c != 0; c = c-&gt;next)
+  if (!c-&gt;remote &amp;&amp; c-&gt;pid &gt; 0)
+    (void) kill (c-&gt;pid, SIGTERM);
+</code></pre>
+<p>Remote children use:</p>
+<pre><code class="language-c">remote_kill (c-&gt;pid, sig);
+</code></pre>
+<p>Make then deletes targets through:</p>
+<pre><code class="language-c">delete_child_targets (c);
+</code></pre>
+<p>Finally, it waits for all children:</p>
+<pre><code class="language-c">while (job_slots_used &gt; 0)
+  reap_children (1, 0);
+</code></pre>
+<p>The active child chain is therefore essential during failure handling. Without it, Make would not know which processes to terminate or which targets might be incomplete.</p>
+<h2>Temporary batch files</h2>
+<p>On Windows, a shell command may require a temporary batch or script file. Its name is stored in:</p>
+<pre><code class="language-c">char *sh_batch_file;
+</code></pre>
+<p><code>construct_command_argv()</code> fills this pointer when it creates the temporary file.</p>
+<p>After the process exits, <code>reap_children()</code> removes it:</p>
+<pre><code class="language-c">if (c-&gt;sh_batch_file)
+  {
+    int rm_status = remove (c-&gt;sh_batch_file);
+    free (c-&gt;sh_batch_file);
+    c-&gt;sh_batch_file = NULL;
+  }
+</code></pre>
+<p>The child owns this temporary execution artifact. The recipe record does not, because the batch file belongs only to this particular expanded command.</p>
+<h2>Freeing a child</h2>
+<p>After completion, Make removes the child from the active chain and calls:</p>
+<pre><code class="language-c">free_child (c);
+</code></pre>
+<p>Before releasing memory, it returns jobserver capacity:</p>
+<pre><code class="language-c">if (jobserver_enabled () &amp;&amp; jobserver_tokens &gt; 1)
+  {
+    jobserver_release (1);
+</code></pre>
+<p>Then it decrements the token count:</p>
+<pre><code class="language-c">--jobserver_tokens;
+</code></pre>
+<p>It releases expanded command lines:</p>
+<pre><code class="language-c">for (i = 0; i &lt; child-&gt;file-&gt;cmds-&gt;ncommand_lines; ++i)
+  free (child-&gt;command_lines[i]);
+free (child-&gt;command_lines);
+</code></pre>
+<p>Finally it frees the shared process resources:</p>
+<pre><code class="language-c">free_childbase ((struct childbase*)child);
+free (child);
+</code></pre>
+<p><code>free_childbase()</code> releases:</p>
+<ul>
+<li>the environment strings;</li>
+<li>the command-name copy;</li>
+<li>and any common platform-specific storage.</li>
+</ul>
+<p>The original <code>struct commands</code> remains. Only this execution’s expanded copy disappears.</p>
+<h2>Jobserver tokens and parallelism</h2>
+<p>Parallel Make uses a jobserver to coordinate the number of active processes. <code>new_job()</code> obtains a token before starting a child:</p>
+<pre><code class="language-c">++jobserver_tokens;
+</code></pre>
+<p>The child’s <code>jobslot</code> bit records that it owns a slot:</p>
+<pre><code class="language-c">unsigned int jobslot:1;
+</code></pre>
+<p>When the child is freed, the token is returned if appropriate.</p>
+<p>This prevents a parent Make and its recursive children from exceeding the requested parallelism. The jobserver acts like a box of reusable admission tickets:</p>
+<pre><code class="language-text">ticket available:
+  another child may start
+
+ticket held by child:
+  one parallel slot is occupied
+
+ticket returned:
+  another job may begin
+</code></pre>
+<p>Recursive children inherit the jobserver descriptors only when the command is recognized as recursive. The command’s <code>recursive</code> field and the <code>COMMANDS_RECURSE</code> flag therefore affect both process launch and parallel scheduling.</p>
+<h2>A complete example</h2>
+<p>Consider:</p>
+<pre><code class="language-make">app: main.o util.o
+	@echo Linking $@
+	$(CC) -o $@ $^
+</code></pre>
+<p>Assume <code>main.o</code> and <code>util.o</code> are ready.</p>
+<h3>1. The target is selected</h3>
+<p><code>update_goal_chain()</code> determines that <code>app</code> needs rebuilding, as explained in <a href="07_update_goal_chain.html">update_goal_chain</a>.</p>
+<h3>2. The recipe is prepared</h3>
+<p><code>execute_file_commands()</code> initializes:</p>
+<pre><code class="language-text">@ = app
+^ = main.o util.o
+</code></pre>
+<p>Then <code>new_job()</code> expands the recipe:</p>
+<pre><code class="language-text">echo Linking app
+cc -o app main.o util.o
+</code></pre>
+<h3>3. A child is created</h3>
+<p>The child stores:</p>
+<pre><code class="language-text">file          = app
+command_lines = expanded two-line array
+command_line  = first line
+pid           = not assigned yet
+environment   = not built yet
+</code></pre>
+<h3>4. The first process starts</h3>
+<p><code>start_job_command()</code> identifies <code>@</code> as silent and starts:</p>
+<pre><code class="language-text">echo Linking app
+</code></pre>
+<p>The process ID is stored in <code>child-&gt;pid</code>, and the child is added to <code>children</code>.</p>
+<h3>5. The first process finishes</h3>
+<p><code>reap_children()</code> finds the matching PID. Because the command succeeded, it advances the cursor and starts:</p>
+<pre><code class="language-text">cc -o app main.o util.o
+</code></pre>
+<h3>6. The second process finishes</h3>
+<p>The child has no more command lines. Make sets:</p>
+<pre><code class="language-text">file-&gt;update_status = us_success
+</code></pre>
+<p>Then <code>notice_finished_file()</code> marks <code>app</code> complete.</p>
+<h3>7. The child is freed</h3>
+<p>Make:</p>
+<ul>
+<li>dumps synchronized output;</li>
+<li>releases the jobserver token;</li>
+<li>frees expanded command lines;</li>
+<li>frees the environment;</li>
+<li>removes the child from <code>children</code>.</li>
+</ul>
+<p>The target record remains in the file database, now marked updated.</p>
+<h2>Inspecting child behavior</h2>
+<p>Use job debugging to see the lifecycle:</p>
+<pre><code class="language-sh">make --debug=j
+</code></pre>
+<p>Useful messages include:</p>
+<pre><code class="language-text">Putting child ... on the chain
+Live child ... PID ...
+Reaping winning child ...
+Removing child ... from chain
+</code></pre>
+<p>For a parallel build:</p>
+<pre><code class="language-sh">make -j4 --debug=j
+</code></pre>
+<p>you can observe:</p>
+<ul>
+<li>children waiting for jobserver tokens;</li>
+<li>children delayed by load-average limits;</li>
+<li>multiple PIDs running at once;</li>
+<li>output synchronization;</li>
+<li>and token release after completion.</li>
+</ul>
+<p>To inspect the recipe before a child exists:</p>
+<pre><code class="language-sh">make -n
+</code></pre>
+<p>This displays expanded commands without starting ordinary subprocesses.</p>
+<p>To inspect target state after execution:</p>
+<pre><code class="language-sh">make -p
+</code></pre>
+<p>Look at the corresponding <code>struct file</code>. The child itself is temporary and is normally gone by the time the database is printed, but its result appears through:</p>
+<ul>
+<li><code>File has been updated</code>;</li>
+<li><code>Successfully updated</code>;</li>
+<li><code>Failed to be updated</code>;</li>
+<li>and the cached modification time.</li>
+</ul>
+<h2>The child lifecycle</h2>
+<p>A child generally follows this path:</p>
+<pre><code class="language-text">recipe selected
+      ↓
+struct child allocated
+      ↓
+recipe lines expanded
+      ↓
+job slot acquired
+      ↓
+child waits or starts
+      ↓
+process ID recorded
+      ↓
+process runs
+      ↓
+output collected
+      ↓
+child reaped
+      ↓
+next line starts, or target finishes
+      ↓
+status copied to struct file
+      ↓
+child freed
+</code></pre>
+<p>The child is temporary, but it carries state through several subsystems:</p>
+<ul>
+<li><a href="08_struct_commands.html"><code>struct commands</code></a> supplies expanded recipe lines;</li>
+<li><a href="03_variable_expand.html"><code>variable_expand</code></a> produces target-specific command text;</li>
+<li><a href="02_struct_variable.html"><code>struct variable</code></a> supplies the child environment;</li>
+<li><a href="04_struct_file.html"><code>struct file</code></a> receives the result;</li>
+<li><a href="07_update_goal_chain.html"><code>update_goal_chain</code></a> resumes dependency processing.</li>
+</ul>
+<h2>A compact mental model</h2>
+<p>Think of <code>struct child</code> as a delivery runner’s tracking form.</p>
+<h3>Assignment</h3>
+<pre><code class="language-c">struct file *file;
+</code></pre>
+<p>Which target is this runner serving?</p>
+<h3>Expanded package</h3>
+<pre><code class="language-c">char **command_lines;
+char *command_ptr;
+unsigned int command_line;
+</code></pre>
+<p>Which concrete commands must be delivered, and which one is active?</p>
+<h3>Transport identity</h3>
+<pre><code class="language-c">pid_t pid;
+unsigned int remote:1;
+</code></pre>
+<p>Which process is carrying out the work, and is it local or remote?</p>
+<h3>Instructions</h3>
+<pre><code class="language-c">unsigned int noerror:1;
+unsigned int recursive:1;
+unsigned int dontcare:1;
+</code></pre>
+<p>Should errors be ignored? Is this a recursive Make? Should failure diagnostics be suppressed?</p>
+<h3>Resources</h3>
+<pre><code class="language-c">char **environment;
+struct output output;
+unsigned int good_stdin:1;
+unsigned int jobslot:1;
+</code></pre>
+<p>What environment, output channel, input stream, and parallel slot belong to this job?</p>
+<h3>Cleanup</h3>
+<pre><code class="language-c">char *sh_batch_file;
+unsigned int deleted:1;
+</code></pre>
+<p>Is there a temporary script to remove? Have partially created targets already been deleted?</p>
+<p>The complete relationship is:</p>
+<pre><code class="language-text">struct commands
+  reusable recipe text
+        ↓
+new_job
+  target-specific expansion
+        ↓
+struct child
+  one execution attempt
+        ↓
+operating-system process
+  shell or direct command
+        ↓
+reap_children
+  exit status and output
+        ↓
+struct file
+  updated target state
+</code></pre>
+<h2>Key takeaways</h2>
+<ul>
+<li><code>struct child</code> tracks one target’s active or recently completed recipe execution.</li>
+<li>Its common <code>CHILDBASE</code> fields hold the environment, command name, and output context.</li>
+<li><code>file</code> points to the target’s persistent <code>struct file</code> record.</li>
+<li><code>command_lines</code> contains expanded commands owned by this execution.</li>
+<li><code>command_ptr</code> and <code>command_line</code> identify the current recipe position.</li>
+<li><code>pid</code> identifies the local or remote process.</li>
+<li><code>children</code> is the chain of active jobs.</li>
+<li><code>waiting_jobs</code> holds jobs delayed by load limits or process-table limits.</li>
+<li><code>remote</code> distinguishes local execution from remote execution.</li>
+<li><code>recursive</code> identifies commands that invoke another Make.</li>
+<li><code>noerror</code> implements <code>-</code> recipe prefixes and <code>.IGNORE</code>.</li>
+<li><code>good_stdin</code> ensures only one parallel child receives usable standard input.</li>
+<li><code>dontcare</code> preserves optional-error behavior while a job runs.</li>
+<li><code>environment</code> is built from exported Make variables for the target context.</li>
+<li><code>output</code> supports synchronized output for parallel jobs.</li>
+<li><code>sh_batch_file</code> tracks temporary Windows shell scripts or batch files.</li>
+<li><code>new_job()</code> creates the child, expands commands, obtains a job slot, and schedules it.</li>
+<li><code>start_job_command()</code> turns one expanded line into an argument vector and starts it.</li>
+<li><code>child_execute_job()</code> performs platform-specific process creation.</li>
+<li><code>reap_children()</code> matches completed processes by PID, advances recipe lines, and handles failures.</li>
+<li><code>notice_finished_file()</code> transfers the child’s result back to the target’s <code>struct file</code>.</li>
+<li><code>delete_child_targets()</code> removes incomplete outputs after interruption or configured failure.</li>
+<li><code>free_child()</code> releases command lines, environments, output state, and jobserver capacity.</li>
+<li>The child is temporary execution state; the target’s <code>struct file</code> is the lasting build record.</li>
+</ul>
+<p>You have now followed GNU Make from its first input files, through variables, expansion, targets, dependencies, rules, goal updates, recipes, and finally subprocess execution. The structures in these nine chapters form a pipeline:</p>
+<pre><code class="language-text">makefiles
+   ↓
+variables and rules
+   ↓
+file and dependency graph
+   ↓
+goal update decisions
+   ↓
+commands
+   ↓
+children
+   ↓
+completed targets
+</code></pre>
+<p>The next step is no longer a single structure, but the larger task of exploring how these pieces cooperate in real builds: tracing a target from command line to completed file, debugging parallel scheduling, and reading GNU Make’s source with confidence.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="08_struct_commands.html">&larr; struct commands</a></span>
+    <span>&nbsp;</span>
+  </nav>
+</body>
+</html>

@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>struct file — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 4: struct file</h1>
+<p>What happens when Make sees this rule?</p>
+<pre><code class="language-make">app: main.o util.o
+	$(CC) -o $@ $^
+</code></pre>
+<p>At first, <code>app</code> might not exist. <code>main.o</code> might not exist either. The recipe is only text, and the timestamps have not yet been compared. Make needs a place to collect all of this information before it can decide what to do.</p>
+<p>It also needs to remember targets that are not real files:</p>
+<pre><code class="language-make">.PHONY: clean
+clean:
+	rm -f *.o app
+</code></pre>
+<p><code>clean</code> is a named build target even though no file named <code>clean</code> should be created.</p>
+<p>This is the job of <code>struct file</code>.</p>
+<blockquote>
+<p><strong>Description:</strong> A <code>struct file</code> represents a named target or prerequisite, whether or not it exists on disk. It tracks dependencies, recipes, timestamps, state, special-target flags, and target-specific variables. Think of it as a project card that records what a file is, what creates it, and whether it needs rebuilding.</p>
+</blockquote>
+<p>The structure is declared in <a href="../src/filedef.h"><code>src/filedef.h</code></a>. It is used throughout the file database and dependency engine.</p>
+<h2>The central project card</h2>
+<p>The beginning of the structure looks like this:</p>
+<pre><code class="language-c">struct file
+  {
+    const char *name;
+    const char *hname;
+    const char *vpath;
+    struct dep *deps;
+    struct commands *cmds;
+    const char *stem;
+</code></pre>
+<p>These fields describe the target’s identity and build instructions:</p>
+<ul>
+<li><code>name</code>: the name Make currently uses for the target.</li>
+<li><code>hname</code>: the name used as the hash-table key.</li>
+<li><code>vpath</code>: a pathname found through VPATH searching.</li>
+<li><code>deps</code>: the target’s prerequisites.</li>
+<li><code>cmds</code>: the recipe used to create or update it.</li>
+<li><code>stem</code>: the part matched by <code>%</code> in an implicit or static pattern rule.</li>
+</ul>
+<p>You can picture each <code>struct file</code> as a card in a filing cabinet:</p>
+<pre><code class="language-text">Target: app
+Prerequisites: main.o util.o
+Recipe: $(CC) -o $@ $^
+Timestamp: unknown
+State: not started
+</code></pre>
+<p>The card exists inside Make even if the file named <code>app</code> does not exist on disk.</p>
+<h2>The file database</h2>
+<p>Make keeps all file records in a hash table in <a href="../src/file.c"><code>src/file.c</code></a>:</p>
+<pre><code class="language-c">static struct hash_table files;
+</code></pre>
+<p>The table is initialized during startup:</p>
+<pre><code class="language-c">init_hash_global_variable_set ();
+strcache_init ();
+init_hash_files ();
+</code></pre>
+<p>The <code>init_hash_files()</code> function prepares the table used by <code>lookup_file()</code> and <code>enter_file()</code>.</p>
+<p>This is like a library catalog. Make does not repeatedly create a new card every time it encounters <code>app</code>; it looks up the existing card and adds information to it.</p>
+<h2>Looking up an existing record</h2>
+<p><code>lookup_file()</code> searches the database by name:</p>
+<pre><code class="language-c">struct file *
+lookup_file (const char *name)
+{
+  struct file *f;
+  struct file file_key;
+</code></pre>
+<p>The lookup normalizes some names before searching:</p>
+<pre><code class="language-c">while (name[0] == '.' &amp;&amp; ISDIRSEP (name[1])
+       &amp;&amp; name[2] != '\0')
+  {
+    name += 2;
+</code></pre>
+<p>Thus names such as:</p>
+<pre><code class="language-text">./obj/main.o
+obj/main.o
+</code></pre>
+<p>can refer to the same internal record after the leading <code>./</code> is removed.</p>
+<p>The lookup then uses the hash table:</p>
+<pre><code class="language-c">file_key.hname = name;
+f = hash_find_item (&amp;files, &amp;file_key);
+return f;
+</code></pre>
+<p>If the name is unknown, <code>lookup_file()</code> returns <code>NULL</code>. It does not create anything.</p>
+<h2>Entering a new record</h2>
+<p>When Make needs a record, it calls <code>enter_file()</code>:</p>
+<pre><code class="language-c">struct file *
+enter_file (const char *name)
+{
+  struct file *f;
+  struct file *new;
+</code></pre>
+<p>The function first checks whether the name already exists:</p>
+<pre><code class="language-c">file_key.hname = name;
+file_slot = hash_find_slot (&amp;files, &amp;file_key);
+f = *file_slot;
+</code></pre>
+<p>For an ordinary single-colon target, an existing record is reused:</p>
+<pre><code class="language-c">if (! HASH_VACANT (f) &amp;&amp; !f-&gt;double_colon)
+  {
+    f-&gt;builtin = 0;
+    return f;
+  }
+</code></pre>
+<p>A new record is initialized with an unknown update status:</p>
+<pre><code class="language-c">new = xcalloc (sizeof (struct file));
+new-&gt;name = new-&gt;hname = name;
+new-&gt;update_status = us_none;
+</code></pre>
+<p>The filename is normally stored in the string cache. This gives Make one stable copy of the name and allows fast comparisons.</p>
+<h2>How parsing fills the card</h2>
+<p>The parser described in <a href="01_read_all_makefiles.html">read_all_makefiles</a> eventually reaches <code>record_files()</code> in <a href="../src/read.c"><code>src/read.c</code></a>.</p>
+<p>For a rule such as:</p>
+<pre><code class="language-make">app: main.o util.o
+	$(CC) -o $@ $^
+</code></pre>
+<p>the parser collects:</p>
+<ul>
+<li>target names,</li>
+<li>prerequisite text,</li>
+<li>recipe text,</li>
+<li>recipe source location.</li>
+</ul>
+<p>Then <code>record_files()</code> finds or creates the target record:</p>
+<pre><code class="language-c">f = enter_file (strcache_add (name));
+</code></pre>
+<p>It marks the record as an explicitly described target:</p>
+<pre><code class="language-c">f-&gt;is_explicit = 1;
+f-&gt;is_target = 1;
+</code></pre>
+<p>The parser does not need the target to exist. A makefile declaration is enough to create its project card.</p>
+<h2>Recipes belong to <code>struct commands</code></h2>
+<p>A <code>struct file</code> does not contain recipe text directly. It points to a <code>struct commands</code>:</p>
+<pre><code class="language-c">struct commands
+  {
+    floc fileinfo;
+    char *commands;
+    char **command_lines;
+    unsigned char *lines_flags;
+</code></pre>
+<p>The details of this recipe record are covered in <a href="08_struct_commands.html">struct commands</a>. For now, the important relationship is:</p>
+<pre><code class="language-text">struct file
+      |
+      +-- cmds --&gt; struct commands
+</code></pre>
+<p>When <code>record_files()</code> has collected recipe text, it creates the command record:</p>
+<pre><code class="language-c">cmds = xmalloc (sizeof (struct commands));
+cmds-&gt;fileinfo.filenm = flocp-&gt;filenm;
+cmds-&gt;fileinfo.lineno = cmds_started;
+</code></pre>
+<p>It stores the recipe as one text block:</p>
+<pre><code class="language-c">cmds-&gt;commands = xstrndup (commands, commands_idx);
+cmds-&gt;command_lines = 0;
+cmds-&gt;recipe_prefix = prefix;
+</code></pre>
+<p>The lines are split later by <code>chop_commands()</code>, shortly before execution. This postpones work until Make knows the recipe will actually be used.</p>
+<h2>Prerequisites point to other file cards</h2>
+<p>The <code>deps</code> field points to a chain of <code>struct dep</code> records:</p>
+<pre><code class="language-c">struct dep
+  {
+    DEP (struct dep);
+  };
+</code></pre>
+<p>Each dependency record can point to another <code>struct file</code>:</p>
+<pre><code class="language-c">struct file *file;
+</code></pre>
+<p>For the rule:</p>
+<pre><code class="language-make">app: main.o util.o
+</code></pre>
+<p>the relationship eventually looks like:</p>
+<pre><code class="language-text">app
+ |
+ +-- dep --&gt; main.o
+ |
+ +-- dep --&gt; util.o
+</code></pre>
+<p>The parser first stores prerequisite names. <code>split_prereqs()</code> breaks the text into dependency records, and <code>enter_prereqs()</code> connects each name to a file record:</p>
+<pre><code class="language-c">d1-&gt;file = lookup_file (d1-&gt;name);
+if (d1-&gt;file == 0)
+  d1-&gt;file = enter_file (d1-&gt;name);
+</code></pre>
+<p>This is why Make can track a prerequisite before it exists. <code>main.o</code> gets a card even when there is no <code>main.o</code> on disk.</p>
+<p>The dependency record itself is the link between cards. Its fields are explained in <a href="05_struct_dep.html">struct dep</a>.</p>
+<h2>The complete build graph</h2>
+<p>After parsing several rules, the database forms a graph:</p>
+<pre class="mermaid">sequenceDiagram
+    participant Parser as Parser
+    participant Database as File database
+    participant Target as Target card
+    participant Dependency as Dependency cards
+    participant Builder as Update engine
+
+    Parser->>Database: Find or create target card
+    Parser->>Target: Attach recipe and prerequisite links
+    Database->>Dependency: Resolve prerequisite names to cards
+    Builder->>Target: Read timestamps and state
+    Builder->>Dependency: Update prerequisites first
+    Builder->>Target: Decide whether the recipe must run
+</pre>
+<p>The important point is that Make does not build from the text of the makefile directly. It builds from this connected graph of <code>struct file</code> records and dependency links.</p>
+<h2>Names, hashing, and renaming</h2>
+<p>A file record has both <code>name</code> and <code>hname</code>:</p>
+<pre><code class="language-c">const char *name;
+const char *hname;
+</code></pre>
+<p>Usually they are identical. They differ when VPATH or another pathname search finds the actual file in a different location.</p>
+<p>For example:</p>
+<pre><code class="language-make">VPATH = src
+</code></pre>
+<p>and:</p>
+<pre><code class="language-make">app: main.c
+</code></pre>
+<p>If <code>main.c</code> is found as <code>src/main.c</code>, Make may keep:</p>
+<pre><code class="language-text">name  = src/main.c
+hname = main.c
+</code></pre>
+<p>The hash key must remain stable while Make decides how to use the file. Once the correct pathname is known, <code>rehash_file()</code> or <code>rename_file()</code> updates the database.</p>
+<p><code>rehash_file()</code> is more than a string assignment because changing a hash key requires moving the record to a different hash bucket. It may also merge the renamed record with an existing record under the new name.</p>
+<p>This is like moving a library card to a new catalog drawer while preserving all notes already written on it.</p>
+<h2>Timestamps are cached in the record</h2>
+<p>The timestamp fields are:</p>
+<pre><code class="language-c">FILE_TIMESTAMP last_mtime;
+FILE_TIMESTAMP mtime_before_update;
+</code></pre>
+<p>They use special values:</p>
+<pre><code class="language-c">#define UNKNOWN_MTIME       0
+#define NONEXISTENT_MTIME   1
+#define OLD_MTIME           2
+</code></pre>
+<p>The meanings are:</p>
+<ul>
+<li><code>UNKNOWN_MTIME</code>: Make has not checked the timestamp yet.</li>
+<li><code>NONEXISTENT_MTIME</code>: the named file was not found.</li>
+<li><code>OLD_MTIME</code>: treat the file as older than ordinary files.</li>
+<li>ordinary values: the actual filesystem timestamp.</li>
+<li><code>NEW_MTIME</code>: treat the file as newer than everything else.</li>
+</ul>
+<p>The <code>file_mtime()</code> macro avoids repeated filesystem checks:</p>
+<pre><code class="language-c">#define file_mtime(f) file_mtime_1 ((f), 1)
+</code></pre>
+<p>It uses the cached value when available:</p>
+<pre><code class="language-c">#define file_mtime_1(f, v) \
+  ((f)-&gt;last_mtime == UNKNOWN_MTIME ? f_mtime ((f), v) \
+                                    : (f)-&gt;last_mtime)
+</code></pre>
+<p>The record is therefore both a description of the target and a small cache of what Make learned about it.</p>
+<h2>Reading the timestamp</h2>
+<p><code>f_mtime()</code> in <a href="../src/remake.c"><code>src/remake.c</code></a> checks the filesystem and stores the result:</p>
+<pre><code class="language-c">mtime = name_mtime (file-&gt;name);
+</code></pre>
+<p>If the file is missing and VPATH searching is allowed, Make searches for another pathname:</p>
+<pre><code class="language-c">if (mtime == NONEXISTENT_MTIME &amp;&amp; search
+    &amp;&amp; !file-&gt;ignore_vpath)
+  {
+    const char *name = vpath_search (file-&gt;name,
+                                     &amp;mtime, NULL, NULL);
+</code></pre>
+<p>After the search, the result is stored in the record:</p>
+<pre><code class="language-c">file-&gt;last_mtime = mtime;
+</code></pre>
+<p>For ordinary targets, Make can now compare the target timestamp with each prerequisite timestamp.</p>
+<h2>Deciding whether a target is out of date</h2>
+<p>The update engine starts with the target’s card:</p>
+<pre><code class="language-c">static enum update_status
+update_file_1 (struct file *file, unsigned int depth)
+</code></pre>
+<p>It reads the current timestamp:</p>
+<pre><code class="language-c">this_mtime = file_mtime (file);
+noexist = this_mtime == NONEXISTENT_MTIME;
+</code></pre>
+<p>A missing target normally needs to be built:</p>
+<pre><code class="language-c">must_make = noexist;
+</code></pre>
+<p>Then Make visits the prerequisites. For each one, it calls <code>check_dep()</code> and compares timestamps:</p>
+<pre><code class="language-c">mtime = file_mtime (d-&gt;file);
+</code></pre>
+<p>A prerequisite requires the target to be reconsidered when it is newer:</p>
+<pre><code class="language-c">d-&gt;changed |= noexist || d_mtime &gt; this_mtime;
+</code></pre>
+<p>The basic decision is therefore:</p>
+<pre><code class="language-text">target is missing
+    or a prerequisite is newer
+    or the target is always made
+        =&gt; run the recipe
+</code></pre>
+<p>This is the central purpose of the <code>struct file</code> timestamp fields: they let the update engine make a decision from cached facts.</p>
+<h2>Update status and command state</h2>
+<p>A target can be up to date, waiting, running, or failed. These conditions are represented by two enumerations stored in the record.</p>
+<p>The update status is:</p>
+<pre><code class="language-c">enum update_status
+  {
+    us_success = 0,
+    us_none,
+    us_question,
+    us_failed
+  } update_status;
+</code></pre>
+<p>The meanings are:</p>
+<ul>
+<li><code>us_success</code>: the last update succeeded.</li>
+<li><code>us_none</code>: no update attempt has been made.</li>
+<li><code>us_question</code>: <code>-q</code> determined that work is needed.</li>
+<li><code>us_failed</code>: the update failed.</li>
+</ul>
+<p>The command state is separate:</p>
+<pre><code class="language-c">enum cmd_state
+  {
+    cs_not_started = 0,
+    cs_deps_running,
+    cs_running,
+    cs_finished
+  } command_state;
+</code></pre>
+<p>These answer different questions:</p>
+<ul>
+<li><strong>Update status:</strong> did the attempted update succeed?</li>
+<li><strong>Command state:</strong> where are we in the current execution?</li>
+</ul>
+<p>For example, a target may have <code>us_none</code> while its prerequisites are still being updated and its <code>command_state</code> is <code>cs_deps_running</code>.</p>
+<p>This separation is like a delivery order that has both:</p>
+<ul>
+<li>a result field: successful, failed, or not attempted;</li>
+<li>a progress field: waiting, being packed, or shipped.</li>
+</ul>
+<h2>Starting and finishing a target</h2>
+<p>When a target needs a recipe, <code>remake_file()</code> eventually calls:</p>
+<pre><code class="language-c">execute_file_commands (file);
+</code></pre>
+<p>That function prepares the target context:</p>
+<pre><code class="language-c">initialize_file_variables (file, 0);
+set_file_variables (file, file-&gt;stem);
+</code></pre>
+<p>The first call prepares target-specific variables. The second defines automatic variables such as <code>$@</code>, <code>$&lt;</code>, and <code>$^</code>.</p>
+<p>Then it starts the job:</p>
+<pre><code class="language-c">new_job (file);
+</code></pre>
+<p>The job machinery, described later in <a href="09_struct_child.html">struct child</a>, runs the expanded recipe.</p>
+<p>When the recipe completes, <code>notice_finished_file()</code> updates the card:</p>
+<pre><code class="language-c">file-&gt;command_state = cs_finished;
+file-&gt;updated = 1;
+</code></pre>
+<p>It also refreshes the timestamp if necessary:</p>
+<pre><code class="language-c">file-&gt;last_mtime = i == 0 ? UNKNOWN_MTIME : NEW_MTIME;
+</code></pre>
+<p>The <code>updated</code> flag means that Make has already finished considering this record during the current build.</p>
+<h2>Why <code>updated</code> matters</h2>
+<p>The update engine may encounter the same target through several paths:</p>
+<pre><code class="language-make">all: app
+test: app
+</code></pre>
+<p>If the user requests both <code>all</code> and <code>test</code>, Make should not build <code>app</code> twice.</p>
+<p>The <code>considered</code> field helps prune repeated graph walks:</p>
+<pre><code class="language-c">unsigned int considered;
+</code></pre>
+<p>The <code>updated</code> field records that an update attempt has completed:</p>
+<pre><code class="language-c">unsigned int updated:1;
+</code></pre>
+<p>At the start of <code>update_file_1()</code>:</p>
+<pre><code class="language-c">if (file-&gt;updated)
+  {
+    if (file-&gt;update_status &gt; us_none)
+      return file-&gt;update_status;
+</code></pre>
+<p>A project card can therefore answer, “Have we already dealt with this target during this build?”</p>
+<h2>Detecting circular dependencies</h2>
+<p>The <code>updating</code> flag detects cycles:</p>
+<pre><code class="language-c">unsigned int updating:1;
+</code></pre>
+<p>Before Make starts processing a file, it marks it as updating:</p>
+<pre><code class="language-c">start_updating (file);
+</code></pre>
+<p>If a prerequisite leads back to a file already being updated, Make reports a circular dependency:</p>
+<pre><code class="language-c">if (is_updating (d-&gt;file))
+  {
+    OSS (error, NILF,
+         _(&quot;Circular %s &lt;- %s dependency dropped.&quot;),
+         file-&gt;name, d-&gt;file-&gt;name);
+</code></pre>
+<p>The dependency is removed from consideration rather than causing infinite recursion.</p>
+<p>This is like following arrows on a project chart and discovering that task A is waiting for B while B is waiting for A. The <code>updating</code> mark is the “currently visiting” stamp that reveals the loop.</p>
+<h2>Implicit rules and the stem</h2>
+<p>A target may have no explicit recipe:</p>
+<pre><code class="language-make">app.o: app.c
+</code></pre>
+<p>Make can still find a built-in or pattern rule such as:</p>
+<pre><code class="language-make">%.o: %.c
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>If <code>file-&gt;cmds</code> is empty, the update engine asks the implicit-rule machinery for help:</p>
+<pre><code class="language-c">if (!file-&gt;phony &amp;&amp; file-&gt;cmds == 0
+    &amp;&amp; !file-&gt;tried_implicit)
+  {
+    try_implicit_rule (file, depth);
+    file-&gt;tried_implicit = 1;
+  }
+</code></pre>
+<p>The <code>tried_implicit</code> flag prevents repeated searches.</p>
+<p>When a pattern matches, the matched portion is stored in <code>stem</code>:</p>
+<pre><code class="language-c">file-&gt;stem = strcache_add_len (stem, stemlen);
+</code></pre>
+<p>For <code>build/main.o</code> matched by a suitable pattern, the stem might be:</p>
+<pre><code class="language-text">main
+</code></pre>
+<p>The stem later supplies the automatic variable <code>$*</code> and helps expand pattern prerequisites.</p>
+<h2>Target-specific variables live through <code>struct file</code></h2>
+<p>A target-specific assignment such as:</p>
+<pre><code class="language-make">debug.o: CFLAGS += -DDEBUG
+</code></pre>
+<p>needs somewhere to store the special variable scope. The <code>struct file</code> fields are:</p>
+<pre><code class="language-c">struct variable_set_list *variables;
+struct variable_set_list *pat_variables;
+</code></pre>
+<p>When the parser encounters a target-specific variable, <code>record_target_var()</code> finds or creates the target’s file record:</p>
+<pre><code class="language-c">f = lookup_file (name);
+if (!f)
+  f = enter_file (strcache_add (name));
+</code></pre>
+<p>It initializes the target’s variable chain:</p>
+<pre><code class="language-c">initialize_file_variables (f, 1);
+current_variable_set_list = f-&gt;variables;
+</code></pre>
+<p>Then it defines the variable in that target’s set:</p>
+<pre><code class="language-c">v = try_variable_definition (flocp, defn, origin, 1);
+</code></pre>
+<p>The details of variable records and scope are covered in <a href="02_struct_variable.html">struct variable</a>. The important connection here is that every target-specific variable scope is attached to a <code>struct file</code>.</p>
+<h2>Parent targets and inherited variables</h2>
+<p>The <code>parent</code> field records the target whose dependency caused this file to be updated:</p>
+<pre><code class="language-c">struct file *parent;
+</code></pre>
+<p>During dependency processing:</p>
+<pre><code class="language-c">d-&gt;file-&gt;parent = file;
+</code></pre>
+<p>This relationship serves several purposes:</p>
+<ul>
+<li>diagnostics can say which target needed a missing prerequisite;</li>
+<li>target-specific variables can be inherited;</li>
+<li>recursive update logic can understand the path through the graph.</li>
+</ul>
+<p>For example:</p>
+<pre><code class="language-make">app: CFLAGS += -DAPP
+app: main.o
+</code></pre>
+<p>When Make updates <code>main.o</code> because <code>app</code> needs it, the variable chain can connect <code>main.o</code> back to <code>app</code>.</p>
+<p>Think of <code>parent</code> as the folder that handed a worker their current assignment. The worker can use the folder’s inherited instructions while performing the task.</p>
+<h2>Pattern-specific variable records</h2>
+<p>The <code>pat_variables</code> field remembers pattern-specific variable information:</p>
+<pre><code class="language-c">struct variable_set_list *pat_variables;
+</code></pre>
+<p>For:</p>
+<pre><code class="language-make">lib/%.o: CFLAGS += -fPIC
+</code></pre>
+<p>Make stores the pattern definition separately. Later, when it has a concrete target such as <code>lib/math.o</code>, <code>initialize_file_variables()</code> searches the pattern-variable list and applies matching definitions.</p>
+<p>The <code>pat_searched</code> flag prevents repeating that search:</p>
+<pre><code class="language-c">unsigned int pat_searched:1;
+</code></pre>
+<p>This keeps pattern-specific behavior lazy. Make does not need to match every pattern against every possible filename while reading the makefile.</p>
+<h2>Special targets are ordinary records with special flags</h2>
+<p>Special targets such as <code>.PHONY</code>, <code>.PRECIOUS</code>, and <code>.INTERMEDIATE</code> are represented by ordinary <code>struct file</code> records. Their names give them special meaning.</p>
+<p>For example, <code>snap_deps()</code> processes <code>.PHONY</code>:</p>
+<pre><code class="language-c">for (f = lookup_file (&quot;.PHONY&quot;); f != 0; f = f-&gt;prev)
+  for (d = f-&gt;deps; d != 0; d = d-&gt;next)
+</code></pre>
+<p>Each named prerequisite is marked:</p>
+<pre><code class="language-c">f2-&gt;phony = 1;
+f2-&gt;is_target = 1;
+f2-&gt;last_mtime = NONEXISTENT_MTIME;
+</code></pre>
+<p>A phony target is treated as nonexistent even if a file with that name happens to appear on disk. This forces its recipe to run whenever it is requested.</p>
+<p>Other special-target flags include:</p>
+<pre><code class="language-c">unsigned int precious:1;
+unsigned int intermediate:1;
+unsigned int secondary:1;
+unsigned int notintermediate:1;
+unsigned int dontcare:1;
+</code></pre>
+<p>They control behavior such as:</p>
+<ul>
+<li>whether a target may be deleted after interruption;</li>
+<li>whether it may be removed as an intermediate;</li>
+<li>whether missing files should produce diagnostics;</li>
+<li>whether a target is protected from intermediate-file cleanup.</li>
+</ul>
+<h2><code>also_make</code>: grouped and peer targets</h2>
+<p>Some recipes create several targets at once:</p>
+<pre><code class="language-make">program program.map &amp;: main.o
+	ld -o program main.o
+</code></pre>
+<p>The <code>also_make</code> field records the peer targets:</p>
+<pre><code class="language-c">struct dep *also_make;
+</code></pre>
+<p>When the primary target is updated, Make also updates the state of these related records.</p>
+<p>Pattern rules can create grouped targets as well. In <code>implicit.c</code>, Make creates peer records and links them into <code>file-&gt;also_make</code>.</p>
+<p>This is like one construction job producing several labeled products. The build card for the job needs to remember every product so Make does not later believe that one of them is still missing.</p>
+<h2>Double-colon rules use multiple records</h2>
+<p>A double-colon rule can define multiple independent recipes:</p>
+<pre><code class="language-make">archive:: source-a
+	recipe-a
+
+archive:: source-b
+	recipe-b
+</code></pre>
+<p>Make represents these with multiple <code>struct file</code> records connected through:</p>
+<pre><code class="language-c">struct file *prev;
+struct file *last;
+struct file *double_colon;
+</code></pre>
+<p>The first record represents the shared name. Each double-colon entry gets its own record, prerequisites, recipe, timestamp state, and update status.</p>
+<p><code>enter_file()</code> detects this situation:</p>
+<pre><code class="language-c">if (! HASH_VACANT (f) &amp;&amp; !f-&gt;double_colon)
+  return f;
+</code></pre>
+<p>When a double-colon record already exists, it creates another record and links it into the chain:</p>
+<pre><code class="language-c">new-&gt;double_colon = f;
+f-&gt;last-&gt;prev = new;
+f-&gt;last = new;
+</code></pre>
+<p>The update engine walks the chain and considers each double-colon rule separately.</p>
+<p>This is like several independent work orders filed under the same product name. They share a label but retain separate instructions.</p>
+<h2>Built-in records and user records</h2>
+<p>The <code>builtin</code> flag identifies records created from Make’s built-in rules:</p>
+<pre><code class="language-c">unsigned int builtin:1;
+</code></pre>
+<p>For example, <code>set_default_suffixes()</code> creates <code>.SUFFIXES</code> and marks it:</p>
+<pre><code class="language-c">suffix_file-&gt;builtin = 1;
+</code></pre>
+<p>When a user later defines a matching target, <code>enter_file()</code> clears the built-in status:</p>
+<pre><code class="language-c">f-&gt;builtin = 0;
+</code></pre>
+<p>This lets user definitions take precedence over built-in information while preserving the database structure.</p>
+<p>The <code>-r</code> and <code>-R</code> options also use this distinction when Make removes or suppresses built-in rules and variables.</p>
+<h2>Loaded objects and renamed records</h2>
+<p>The record also supports dynamically loaded objects:</p>
+<pre><code class="language-c">unsigned int loaded:1;
+unsigned int unloaded:1;
+</code></pre>
+<p>The <code>load</code> directive can associate a loaded object with a file record. If Make needs to rebuild it, <code>execute_file_commands()</code> unloads it first:</p>
+<pre><code class="language-c">if (file-&gt;loaded &amp;&amp; unload_file (file-&gt;name) == 0)
+  {
+    file-&gt;loaded = 0;
+    file-&gt;unloaded = 1;
+  }
+</code></pre>
+<p>The <code>renamed</code> pointer handles a different situation: a file record may move from one name to another because of VPATH, archive handling, or another lookup operation.</p>
+<p>The macro:</p>
+<pre><code class="language-c">#define check_renamed(file) \
+  while ((file)-&gt;renamed != 0) (file) = (file)-&gt;renamed
+</code></pre>
+<p>follows the chain until it reaches the current record.</p>
+<h2>Cleaning up intermediate files</h2>
+<p>Implicit rule search may create temporary prerequisites:</p>
+<pre><code class="language-text">source.c -&gt; source.o -&gt; app
+</code></pre>
+<p>If <code>source.o</code> was created only as an intermediate step, Make may delete it after the build.</p>
+<p>The relevant flags are:</p>
+<pre><code class="language-c">unsigned int intermediate:1;
+unsigned int secondary:1;
+unsigned int notintermediate:1;
+unsigned int precious:1;
+</code></pre>
+<p><code>remove_intermediates()</code> checks these fields:</p>
+<pre><code class="language-c">if (f-&gt;intermediate &amp;&amp; (f-&gt;dontcare || !f-&gt;precious)
+    &amp;&amp; !f-&gt;secondary &amp;&amp; !f-&gt;notintermediate
+    &amp;&amp; !f-&gt;cmd_target)
+</code></pre>
+<p>Only records satisfying the cleanup policy are removed.</p>
+<p>This is like a workshop throwing away temporary jigs after a product is finished, while keeping anything labeled precious, reusable, or explicitly requested by the customer.</p>
+<h2>Inspecting records with <code>make -p</code></h2>
+<p>The file database can be printed with:</p>
+<pre><code class="language-sh">make -p
+</code></pre>
+<p><code>print_file_data_base()</code> walks the file hash table:</p>
+<pre><code class="language-c">void
+print_file_data_base (void)
+{
+  puts (_(&quot;\n# Files&quot;));
+  hash_map (&amp;files, print_file);
+</code></pre>
+<p>For each record, <code>print_file()</code> displays:</p>
+<ul>
+<li>the target name;</li>
+<li>whether it is a target;</li>
+<li>prerequisites;</li>
+<li>target-specific variables;</li>
+<li>special flags;</li>
+<li>the timestamp;</li>
+<li>whether it was updated;</li>
+<li>update status;</li>
+<li>recipe text.</li>
+</ul>
+<p>Typical output may include:</p>
+<pre><code class="language-text">#  File does not exist.
+#  File has not been updated.
+#  Successfully updated.
+</code></pre>
+<p>This is one of the best ways to see the project cards Make has constructed.</p>
+<h2>A complete example</h2>
+<p>Consider:</p>
+<pre><code class="language-make">VPATH = src
+
+app: main.o util.o
+	$(CC) -o $@ $^
+
+main.o: main.c
+util.o: util.c
+
+.PHONY: clean
+clean:
+	rm -f app *.o
+</code></pre>
+<p>After parsing, Make has records conceptually like these:</p>
+<pre><code class="language-text">app
+  deps: main.o, util.o
+  cmds: $(CC) -o $@ $^
+  is_target: yes
+
+main.o
+  deps: main.c
+  cmds: implicit rule or none
+  is_target: yes
+
+main.c
+  name: src/main.c or main.c
+  last_mtime: cached timestamp
+
+clean
+  phony: yes
+  cmds: rm -f app *.o
+</code></pre>
+<p>When Make builds <code>app</code>:</p>
+<ol>
+<li>It reads <code>app-&gt;last_mtime</code>.</li>
+<li>It updates <code>main.o</code> and <code>util.o</code>.</li>
+<li>Each object target may use an implicit rule.</li>
+<li>It compares prerequisite timestamps with <code>app</code>.</li>
+<li>It initializes automatic variables and target-specific variables.</li>
+<li>It expands the recipe using <code>variable_expand_for_file()</code>, described in <a href="03_variable_expand.html">variable_expand</a>.</li>
+<li>It starts the commands.</li>
+<li>It records the final state in <code>app</code>.</li>
+</ol>
+<p>The target card is the shared object passed through every stage.</p>
+<h2>The lifecycle of a <code>struct file</code></h2>
+<p>A file record typically follows this path:</p>
+<pre><code class="language-text">name encountered
+      ↓
+lookup_file or enter_file
+      ↓
+prerequisites and recipe attached
+      ↓
+special flags applied
+      ↓
+target-specific variables initialized
+      ↓
+timestamp checked
+      ↓
+dependencies updated
+      ↓
+recipe selected and expanded
+      ↓
+commands executed
+      ↓
+status and timestamp recorded
+      ↓
+optional intermediate cleanup
+</code></pre>
+<p>Different source files handle different parts:</p>
+<ul>
+<li><a href="../src/file.c"><code>src/file.c</code></a>: database operations, timestamps, prerequisites, special flags, and printing.</li>
+<li><a href="../src/read.c"><code>src/read.c</code></a>: creates records while parsing rules.</li>
+<li><a href="../src/remake.c"><code>src/remake.c</code></a>: decides whether records need updating.</li>
+<li><a href="../src/implicit.c"><code>src/implicit.c</code></a>: finds pattern recipes and stems.</li>
+<li><a href="../src/variable.c"><code>src/variable.c</code></a>: attaches variable scopes to records.</li>
+<li><a href="../src/commands.c"><code>src/commands.c</code></a>: defines automatic variables for a record.</li>
+<li><a href="../src/job.c"><code>src/job.c</code></a>: runs the record’s recipe.</li>
+</ul>
+<h2>A compact mental model</h2>
+<p>Think of <code>struct file</code> as a project card with several sections:</p>
+<h3>Identity</h3>
+<pre><code class="language-text">name, hname, vpath
+</code></pre>
+<p>Where is this target known, and where was it found?</p>
+<h3>Build instructions</h3>
+<pre><code class="language-text">deps, cmds, stem, also_make
+</code></pre>
+<p>What does it depend on, what creates it, and what other outputs are produced?</p>
+<h3>Time information</h3>
+<pre><code class="language-text">last_mtime, mtime_before_update
+</code></pre>
+<p>When did it exist, and what was its timestamp before Make tried to update it?</p>
+<h3>Progress</h3>
+<pre><code class="language-text">considered, updating, updated
+update_status, command_state
+</code></pre>
+<p>Has Make visited it? Is it currently being processed? Did its update succeed?</p>
+<h3>Special behavior</h3>
+<pre><code class="language-text">phony, precious, intermediate, secondary
+dontcare, is_explicit, builtin
+</code></pre>
+<p>Should it always run? Can it be deleted? Is it optional or built in?</p>
+<h3>Variable context</h3>
+<pre><code class="language-text">variables, pat_variables, parent
+</code></pre>
+<p>Which target-specific and inherited variables apply while this target is being built?</p>
+<p>This organization explains why one structure is central to so many parts of Make. The target card is where identity, dependency information, timestamps, execution state, and variable context meet.</p>
+<h2>Key takeaways</h2>
+<ul>
+<li>Every named target or prerequisite can have a <code>struct file</code> record, even when no disk file exists.</li>
+<li>The file database is a hash table accessed through <code>lookup_file()</code> and <code>enter_file()</code>.</li>
+<li><code>record_files()</code> attaches recipes and prerequisite links while parsing makefiles.</li>
+<li>Recipes are stored through <code>struct commands</code>.</li>
+<li>Prerequisites are connected through <code>struct dep</code> records.</li>
+<li><code>last_mtime</code> caches filesystem timestamps, including special values for missing and artificial files.</li>
+<li><code>update_status</code> records the result of an update; <code>command_state</code> records execution progress.</li>
+<li><code>updated</code>, <code>considered</code>, and <code>updating</code> prevent duplicate work and detect cycles.</li>
+<li><code>stem</code> records the <code>%</code> match used by implicit and static pattern rules.</li>
+<li><code>variables</code>, <code>pat_variables</code>, and <code>parent</code> provide target-specific and inherited variable contexts.</li>
+<li>Special targets such as <code>.PHONY</code> modify flags on ordinary file records.</li>
+<li><code>also_make</code> represents grouped or peer targets created by one recipe.</li>
+<li>Double-colon rules use multiple linked file records for the same name.</li>
+<li>VPATH can cause records to be renamed or merged while preserving their build information.</li>
+<li><code>make -p</code> prints the file database and exposes these internal cards.</li>
+</ul>
+<p>Now that you understand the project card that connects targets to recipes, timestamps, and state, the next question is how the individual prerequisite links inside <code>deps</code> carry ordering, second-expansion, and timestamp rules. That is the subject of <a href="05_struct_dep.html">struct dep</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="03_variable_expand.html">&larr; variable_expand</a></span>
+    <span><a href="05_struct_dep.html">struct dep &rarr;</a></span>
+  </nav>
+</body>
+</html>

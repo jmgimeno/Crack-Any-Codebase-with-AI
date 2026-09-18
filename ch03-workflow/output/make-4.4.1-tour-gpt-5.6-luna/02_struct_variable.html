@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>struct variable — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 2: struct variable</h1>
+<p>What should happen when the same setting appears in several places?</p>
+<p>For example, suppose <code>CC</code> is defined:</p>
+<ul>
+<li>in the process environment,</li>
+<li>in a built-in default,</li>
+<li>in a makefile,</li>
+<li>and on the command line.</li>
+</ul>
+<p>Which compiler should Make use? And what if a target wants special compiler flags that should not affect any other target?</p>
+<p>GNU Make answers these questions with a variable record. A variable is not just a string such as <code>gcc</code>. It is a labeled container that also remembers:</p>
+<ul>
+<li>its name,</li>
+<li>its value,</li>
+<li>how the value should be expanded,</li>
+<li>where it came from,</li>
+<li>where it was defined,</li>
+<li>whether it belongs to one target,</li>
+<li>and whether it should be exported to child processes.</li>
+</ul>
+<p>The central record is <code>struct variable</code>, declared in <a href="../src/variable.h"><code>src/variable.h</code></a>.</p>
+<h2>The variable record</h2>
+<p>Here is the structure, split into its major parts:</p>
+<pre><code class="language-c">struct variable
+  {
+    char *name;
+    char *value;
+    floc fileinfo;
+    unsigned int length;
+</code></pre>
+<p>The first fields describe the variable’s identity and source location:</p>
+<ul>
+<li><code>name</code> is the variable name, such as <code>CC</code>.</li>
+<li><code>value</code> is the stored text, such as <code>gcc</code>.</li>
+<li><code>fileinfo</code> records the makefile and line where it was defined.</li>
+<li><code>length</code> stores the name length.</li>
+</ul>
+<p>The <code>floc</code> type was introduced in the previous chapter’s discussion of makefile reading. It contains a filename, line number, and offset. Keeping this information allows Make to produce messages such as:</p>
+<pre><code class="language-text">Makefile:12: warning: ...
+</code></pre>
+<p>Think of <code>fileinfo</code> as a label on a storage box saying which manual and page supplied its contents.</p>
+<h2>Flags packed into the record</h2>
+<p>Several properties are stored as one-bit flags:</p>
+<pre><code class="language-c">    unsigned int recursive:1;
+    unsigned int append:1;
+    unsigned int conditional:1;
+    unsigned int per_target:1;
+    unsigned int special:1;
+</code></pre>
+<p>These flags mean:</p>
+<ul>
+<li><code>recursive</code>: expand the value when it is used.</li>
+<li><code>append</code>: this value came from an append operation.</li>
+<li><code>conditional</code>: the variable was defined with <code>?=</code>.</li>
+<li><code>per_target</code>: the variable belongs to a target-specific context.</li>
+<li><code>special</code>: Make gives the variable special behavior.</li>
+</ul>
+<p>More flags follow:</p>
+<pre><code class="language-c">    unsigned int exportable:1;
+    unsigned int expanding:1;
+    unsigned int private_var:1;
+    unsigned int exp_count:EXP_COUNT_BITS;
+</code></pre>
+<p>They control:</p>
+<ul>
+<li>whether the name is suitable for an environment variable,</li>
+<li>whether the variable is currently being expanded,</li>
+<li>whether a target-specific value is hidden from inherited contexts,</li>
+<li>and how many self-referential expansions are temporarily allowed.</li>
+</ul>
+<p>The final fields record the variable’s kind, origin, and export policy:</p>
+<pre><code class="language-c">    enum variable_flavor flavor ENUM_BITFIELD (3);
+    enum variable_origin origin ENUM_BITFIELD (3);
+    enum variable_export export ENUM_BITFIELD (2);
+  };
+</code></pre>
+<p>Together, these fields let Make distinguish definitions that look similar to a user but behave differently internally.</p>
+<h2>A variable’s flavor: when does expansion happen?</h2>
+<p>Consider these definitions:</p>
+<pre><code class="language-make">A = $(B)
+B = hello
+</code></pre>
+<p>and:</p>
+<pre><code class="language-make">A := $(B)
+B = hello
+</code></pre>
+<p>They look almost identical, but they do not mean the same thing.</p>
+<p>With <code>=</code>, <code>A</code> stores the text <code>$(B)</code> and expands it later. With <code>:=</code>, Make expands <code>$(B)</code> immediately, while reading the assignment.</p>
+<p>The <code>recursive</code> bit represents this distinction:</p>
+<ul>
+<li><code>recursive = 1</code>: store the expression and expand it later.</li>
+<li><code>recursive = 0</code>: store the already-expanded result.</li>
+</ul>
+<p>The parser identifies the assignment operator in <code>parse_variable_definition()</code>:</p>
+<pre><code class="language-c">if (c == '=')
+  {
+    var-&gt;flavor = f_recursive;
+    break;
+  }
+</code></pre>
+<p>A simple assignment is recognized separately:</p>
+<pre><code class="language-c">if (c == '=')
+  {
+    var-&gt;flavor = f_simple;
+    break;
+  }
+</code></pre>
+<p>In the actual parser, the surrounding branch distinguishes <code>=</code> from <code>:=</code>, <code>::=</code>, and <code>:::=</code>. The important result is the flavor value passed to <code>do_variable_definition()</code>.</p>
+<h3>Recursive variables</h3>
+<p>For a recursive definition:</p>
+<pre><code class="language-make">CFLAGS = $(WARN) -O2
+</code></pre>
+<p>Make stores the right-hand side largely as written. Later, when <code>$(CFLAGS)</code> is expanded, the current value of <code>WARN</code> is consulted.</p>
+<p>This is like storing a recipe card containing “add whatever is currently in the WARN jar.” The result can change if <code>WARN</code> changes later.</p>
+<p>In <code>do_variable_definition()</code>, recursive values use the <code>f_recursive</code> case:</p>
+<pre><code class="language-c">case f_recursive:
+  newval = value;
+  break;
+</code></pre>
+<p>The text is not expanded at definition time.</p>
+<h3>Simple variables</h3>
+<p>For a simple definition:</p>
+<pre><code class="language-make">WARN = -Wall
+CFLAGS := $(WARN) -O2
+WARN = -Wextra
+</code></pre>
+<p><code>CFLAGS</code> becomes <code>-Wall -O2</code>. It does not later acquire <code>-Wextra</code>.</p>
+<p>The implementation expands the value immediately:</p>
+<pre><code class="language-c">case f_simple:
+  newval = alloc_value = allocated_variable_expand (value);
+  break;
+</code></pre>
+<p>This connects directly to the expansion machinery covered in <a href="03_variable_expand.html">variable_expand</a>. The variable record stores the result, rather than the original reference.</p>
+<h3>POSIX expanded assignment</h3>
+<p>GNU Make also supports <code>:::=</code>, represented by <code>f_expand</code>. It expands the value immediately but stores it as a recursive value after protecting dollar signs.</p>
+<p>That behavior is implemented here:</p>
+<pre><code class="language-c">case f_expand:
+  {
+    char *t = allocated_variable_expand (value);
+    char *np = alloc_value = xmalloc (strlen (t) * 2 + 1);
+</code></pre>
+<p>The code then doubles each <code>$</code> before storing the result. This makes a later recursive expansion produce the intended dollar sign.</p>
+<h3>Shell assignments</h3>
+<p>The <code>!=</code> operator runs the right-hand side through a shell:</p>
+<pre><code class="language-make">BUILD_HOST != hostname
+</code></pre>
+<p>The value returned by the shell becomes the variable’s value. The implementation expands the command, calls <code>shell_result()</code>, and changes the flavor to recursive:</p>
+<pre><code class="language-c">case f_shell:
+  {
+    char *q = allocated_variable_expand (value);
+    alloc_value = shell_result (q);
+    free (q);
+    flavor = f_recursive;
+</code></pre>
+<p>This is more expensive than ordinary assignment because it starts a child process. It also means variable definition can have observable side effects while Make is reading the makefile.</p>
+<h2>Origins establish precedence</h2>
+<p>A variable definition also records where it came from:</p>
+<pre><code class="language-c">enum variable_origin
+  {
+    o_default,
+    o_env,
+    o_file,
+    o_env_override,
+    o_command,
+    o_override,
+    o_automatic
+  };
+</code></pre>
+<p>The numeric order is meaningful. Stronger origins have larger values. When a new definition is installed, <code>define_variable_in_set()</code> compares origins:</p>
+<pre><code class="language-c">if ((int) origin &gt;= (int) v-&gt;origin)
+  {
+    free (v-&gt;value);
+    v-&gt;value = xstrdup (value);
+</code></pre>
+<p>A new definition replaces the old one only when its origin is at least as strong.</p>
+<p>The usual precedence, from weaker to stronger, is:</p>
+<ol>
+<li>built-in default,</li>
+<li>environment,</li>
+<li>makefile,</li>
+<li>environment with <code>-e</code>,</li>
+<li>command line,</li>
+<li><code>override</code> directive,</li>
+<li>automatic variables.</li>
+</ol>
+<p>The exact behavior also depends on the option and context, but this ordering is the core idea.</p>
+<p>Imagine several people writing on a bulletin board:</p>
+<ul>
+<li>a printed default notice is easy to replace;</li>
+<li>a makefile notice replaces the default;</li>
+<li>a command-line instruction is a direct request from the person running Make;</li>
+<li>an <code>override</code> directive explicitly says that the makefile should win.</li>
+</ul>
+<h3>Environment definitions</h3>
+<p>In <code>main.c</code>, Make reads the process environment before reading makefiles:</p>
+<pre><code class="language-c">v = define_variable (envp[i], len, ep, o_env, 1);
+</code></pre>
+<p>The final argument, <code>1</code>, marks the value as recursively expanded.</p>
+<p>For example, if the shell starts Make with:</p>
+<pre><code class="language-sh">CC=clang make
+</code></pre>
+<p>Make initially records <code>CC</code> with origin <code>o_env</code>.</p>
+<h3>Command-line definitions</h3>
+<p>A command-line assignment such as:</p>
+<pre><code class="language-sh">make CC=clang
+</code></pre>
+<p>is parsed by <code>handle_non_switch_argument()</code>:</p>
+<pre><code class="language-c">v = try_variable_definition (0, arg, origin, 0);
+</code></pre>
+<p>When <code>origin</code> is <code>o_command</code>, the resulting variable is stronger than an ordinary makefile definition.</p>
+<p>Thus this makefile:</p>
+<pre><code class="language-make">CC = gcc
+</code></pre>
+<p>does not normally replace:</p>
+<pre><code class="language-sh">make CC=clang
+</code></pre>
+<p>The command line acts like a sealed instruction attached to the build request.</p>
+<h3>The <code>override</code> directive</h3>
+<p>A makefile can deliberately take precedence:</p>
+<pre><code class="language-make">override CFLAGS += -fno-common
+</code></pre>
+<p>The parser recognizes the <code>override</code> modifier and selects <code>o_override</code>:</p>
+<pre><code class="language-c">enum variable_origin origin =
+  vmod.override_v ? o_override : o_file;
+</code></pre>
+<p>This is an explicit escalation. It is useful when a project requires a setting even if callers supplied a command-line value.</p>
+<h2>Conditional definitions</h2>
+<p>The <code>?=</code> operator defines a variable only if no definition is visible:</p>
+<pre><code class="language-make">CFLAGS ?= -O2
+</code></pre>
+<p>The implementation first searches for an existing variable:</p>
+<pre><code class="language-c">case f_conditional:
+  v = lookup_variable (varname, strlen (varname));
+  if (v)
+    goto done;
+</code></pre>
+<p>If one exists, the new assignment is skipped. Otherwise, the variable is treated like a recursive definition.</p>
+<p>This is similar to filling an empty labeled container only if nobody has already placed something in it. Importantly, an existing variable with an empty value still counts as defined:</p>
+<pre><code class="language-make">CFLAGS =
+CFLAGS ?= -O2
+</code></pre>
+<p>The second line does not assign <code>-O2</code>.</p>
+<h2>Appending values</h2>
+<p>The <code>+=</code> operator combines an old value and a new value:</p>
+<pre><code class="language-make">CFLAGS = -O2
+CFLAGS += -Wall
+</code></pre>
+<p>The result is conceptually:</p>
+<pre><code class="language-text">-O2 -Wall
+</code></pre>
+<p>The implementation handles this through <code>f_append</code> and <code>f_append_value</code>:</p>
+<pre><code class="language-c">case f_append:
+case f_append_value:
+  {
+    if (target_var)
+      {
+        append = 1;
+        v = lookup_variable_in_set (varname, strlen (varname),
+                                    current_variable_set_list-&gt;set);
+</code></pre>
+<p>For ordinary global variables, Make looks up the visible variable. For target-specific variables, it first looks in the target’s own variable set. This distinction prevents an append in one target context from accidentally modifying a global value.</p>
+<p>If the old variable was recursive, Make preserves the unexpanded expressions. If it was simple, Make combines the already-expanded old value with the appropriate form of the new value.</p>
+<p>That is why these can differ:</p>
+<pre><code class="language-make">A = $(B)
+A += $(C)
+</code></pre>
+<p>versus:</p>
+<pre><code class="language-make">A := $(B)
+A += $(C)
+</code></pre>
+<p>The first keeps deferred expressions. The second starts with an already-expanded value.</p>
+<p>For a recursively appended variable, expansion has special handling in <code>expand.c</code>. The helper <code>variable_append()</code> walks through the variable-set chain, collecting appended pieces in order.</p>
+<p>This is like assembling a stack of labels from the most general shelf to the most specific shelf, then reading the complete list from bottom to top.</p>
+<h2>Where variables are stored</h2>
+<p>Make does not keep every variable in one flat list. It uses hash tables grouped into variable sets.</p>
+<p>The set structure is small:</p>
+<pre><code class="language-c">struct variable_set
+  {
+    struct hash_table table;
+  };
+</code></pre>
+<p>The hash table maps a variable name to its <code>struct variable</code>.</p>
+<p>A linked list connects sets together:</p>
+<pre><code class="language-c">struct variable_set_list
+  {
+    struct variable_set_list *next;
+    struct variable_set *set;
+    int next_is_parent;
+  };
+</code></pre>
+<p>The global variables are represented by a global set list:</p>
+<pre><code class="language-c">static struct variable_set global_variable_set;
+static struct variable_set_list global_setlist
+  = { 0, &amp;global_variable_set, 0 };
+</code></pre>
+<p>The pointer <code>current_variable_set_list</code> identifies the context in which definitions are currently being made.</p>
+<p>Think of this as a series of bulletin boards:</p>
+<pre><code class="language-text">most specific board
+        ↓
+target board
+        ↓
+parent target board
+        ↓
+global board
+</code></pre>
+<p>A lookup starts at the top and stops at the first matching name.</p>
+<h2>Looking up a variable</h2>
+<p><code>lookup_variable()</code> walks the current set list:</p>
+<pre><code class="language-c">for (setlist = current_variable_set_list;
+     setlist != 0; setlist = setlist-&gt;next)
+  {
+    const struct variable_set *set = setlist-&gt;set;
+    struct variable *v;
+</code></pre>
+<p>It searches each hash table:</p>
+<pre><code class="language-c">v = hash_find_item ((struct hash_table *) &amp;set-&gt;table, &amp;var_key);
+if (v &amp;&amp; (!is_parent || !v-&gt;private_var))
+  return v;
+</code></pre>
+<p>The first matching record wins. This is the data-structure form of precedence by scope.</p>
+<p>If the record is marked <code>special</code>, lookup calls <code>lookup_special_var()</code>. Special variables include introspection variables such as <code>.VARIABLES</code>, whose value is rebuilt when the global variable database changes.</p>
+<p>The expansion path eventually uses this same lookup. In <code>expand.c</code>, <code>reference_variable()</code> finds the record and then chooses whether to expand its value:</p>
+<pre><code class="language-c">value = (v-&gt;recursive ? recursively_expand (v) : v-&gt;value);
+</code></pre>
+<p>So <code>struct variable</code> is the bridge between parsing and expansion:</p>
+<pre><code class="language-text">makefile assignment
+        ↓
+struct variable
+        ↓
+variable lookup
+        ↓
+recursive or direct expansion
+</code></pre>
+<h2>Target-specific variables</h2>
+<p>A target-specific variable applies only while building one target and its prerequisites:</p>
+<pre><code class="language-make">debug.o: CFLAGS += -DDEBUG
+</code></pre>
+<p>The parser cannot treat this like an ordinary global assignment because the text before the colon is a target name. <code>eval()</code> detects the target-specific form and calls:</p>
+<pre><code class="language-c">record_target_var (filenames, p2,
+                   vmod.override_v ? o_override : o_file,
+                   &amp;vmod, fstart);
+</code></pre>
+<p>For each target, <code>record_target_var()</code> finds or creates a <code>struct file</code>, initializes its variable sets, and temporarily switches the current context:</p>
+<pre><code class="language-c">initialize_file_variables (f, 1);
+current_variable_set_list = f-&gt;variables;
+v = try_variable_definition (flocp, defn, origin, 1);
+current_variable_set_list = global;
+</code></pre>
+<p>The resulting variable is marked:</p>
+<pre><code class="language-c">v-&gt;per_target = 1;
+</code></pre>
+<p>Later, when Make prepares a recipe, <code>variable_expand_for_file()</code> temporarily uses that file’s variable chain:</p>
+<pre><code class="language-c">savev = current_variable_set_list;
+current_variable_set_list = file-&gt;variables;
+</code></pre>
+<p>The recipe therefore sees the target-specific value, while an unrelated target continues to see the global value.</p>
+<h3>Inheritance through prerequisites</h3>
+<p>Target-specific values are inherited by prerequisites by default. For example:</p>
+<pre><code class="language-make">app: CFLAGS += -DAPP
+app: main.o
+</code></pre>
+<p>When Make builds <code>main.o</code> as part of <code>app</code>, the <code>CFLAGS</code> context can include <code>-DAPP</code>.</p>
+<p>The <code>next_is_parent</code> field in <code>struct variable_set_list</code> records this relationship. <code>initialize_file_variables()</code> connects a file’s set list to either:</p>
+<ul>
+<li>its parent target’s variables, or</li>
+<li>the global set list.</li>
+</ul>
+<p>This is why a target-specific variable behaves more like a context passed down a dependency tree than like a value attached only to one filename.</p>
+<h3>Private target-specific variables</h3>
+<p>A target-specific variable can be marked <code>private</code>:</p>
+<pre><code class="language-make">app: private CFLAGS += -DAPP_ONLY
+</code></pre>
+<p>The parser records this with:</p>
+<pre><code class="language-c">if (vmod-&gt;private_v)
+  v-&gt;private_var = 1;
+</code></pre>
+<p>When a lookup crosses into a parent context, <code>private_var</code> prevents the value from being inherited.</p>
+<p>The analogy is a private note on a parent’s work order. The parent can read it, but it is not copied onto every worker’s work order.</p>
+<h2>Pattern-specific variables</h2>
+<p>The same idea applies to patterns:</p>
+<pre><code class="language-make">lib/%.o: CFLAGS += -fPIC
+</code></pre>
+<p>Because the target contains <code>%</code>, <code>record_target_var()</code> creates a <code>struct pattern_var</code>:</p>
+<pre><code class="language-c">p = create_pattern_var (name, percent);
+p-&gt;variable.fileinfo = *flocp;
+v = assign_variable_definition (&amp;p-&gt;variable, defn);
+</code></pre>
+<p>Pattern variables are kept in a separate chain. <code>create_pattern_var()</code> inserts them in pattern-length order so that more specific matches can take priority.</p>
+<p>When Make later initializes variables for a concrete target, <code>initialize_file_variables()</code> searches the pattern-variable list and copies matching definitions into a target-specific set.</p>
+<p>This delays pattern matching until Make knows the actual target name. It is like storing a rule saying “all workers assigned to the library department receive this badge,” then applying it when a specific worker arrives.</p>
+<h2>The <code>private_var</code> and inheritance check</h2>
+<p>The lookup code tracks whether it is crossing a parent boundary:</p>
+<pre><code class="language-c">is_parent |= setlist-&gt;next_is_parent;
+</code></pre>
+<p>Once <code>is_parent</code> becomes true, private variables are skipped:</p>
+<pre><code class="language-c">if (v &amp;&amp; (!is_parent || !v-&gt;private_var))
+  return v;
+</code></pre>
+<p>The condition is compact, but the intent is simple:</p>
+<ul>
+<li>in the current target’s own set, a private variable is visible;</li>
+<li>in a parent set, a private variable is hidden.</li>
+</ul>
+<p>This is one reason the variable system uses a linked list of sets instead of copying every inherited variable into every target.</p>
+<h2>Exporting variables to recipes</h2>
+<p>Make variables and shell environment variables are related, but they are not the same storage.</p>
+<p>A make variable such as:</p>
+<pre><code class="language-make">CC = clang
+</code></pre>
+<p>is available to Make’s expansion engine. It is not automatically placed in the environment of every recipe.</p>
+<p>The <code>export</code> field controls this:</p>
+<pre><code class="language-c">enum variable_export
+{
+  v_default,
+  v_export,
+  v_noexport,
+  v_ifset
+};
+</code></pre>
+<p>The values mean:</p>
+<ul>
+<li><code>v_default</code>: use normal export rules.</li>
+<li><code>v_export</code>: always export.</li>
+<li><code>v_noexport</code>: never export.</li>
+<li><code>v_ifset</code>: export if the variable has a non-default value.</li>
+</ul>
+<p>The parser handles directives such as:</p>
+<pre><code class="language-make">export CC
+unexport SECRET
+</code></pre>
+<p>For an explicit assignment, <code>parse_var_assignment()</code> records the modifier, and <code>eval()</code> applies it:</p>
+<pre><code class="language-c">if (vmod.export_v != v_default)
+  v-&gt;export = vmod.export_v;
+</code></pre>
+<p>A bare directive applies globally:</p>
+<pre><code class="language-make">export
+</code></pre>
+<p>or:</p>
+<pre><code class="language-make">unexport
+</code></pre>
+<p>The parser changes the global <code>export_all_variables</code> setting for these forms.</p>
+<h2>Building a child environment</h2>
+<p>When Make starts a recipe, <code>commands.c</code> eventually requests an environment through <code>target_environment()</code>.</p>
+<p>That function walks variable sets from most specific to least specific:</p>
+<pre><code class="language-c">for (s = set_list; s != 0; s = s-&gt;next)
+  {
+    struct variable_set *set = s-&gt;set;
+    const int islocal = s == set_list;
+</code></pre>
+<p>The first occurrence of a variable is retained. This ensures a target-specific value can override a global value in the child environment.</p>
+<p>The function then tests whether each variable should be exported:</p>
+<pre><code class="language-c">if (! should_export (v))
+  continue;
+</code></pre>
+<p>Recursive variables are expanded before being converted into environment strings:</p>
+<pre><code class="language-c">if (v-&gt;recursive
+    &amp;&amp; (v-&gt;origin != o_env &amp;&amp; v-&gt;origin != o_env_override))
+  value = cp = recursively_expand_for_file (v, file);
+</code></pre>
+<p>Finally, Make creates strings in the form:</p>
+<pre><code class="language-text">NAME=value
+</code></pre>
+<p>Those strings are passed to the child process. The child sees an environment snapshot, not a pointer to Make’s internal <code>struct variable</code>.</p>
+<p>The flow is:</p>
+<pre class="mermaid">sequenceDiagram
+    participant Parser as Makefile parser
+    participant Sets as Variable sets
+    participant Lookup as Variable lookup
+    participant Env as Environment builder
+    participant Child as Recipe process
+
+    Parser->>Sets: Store definition with origin and flavor
+    Lookup->>Sets: Search specific scope first
+    Sets-->>Lookup: Return winning variable record
+    Env->>Sets: Collect visible exportable values
+    Env->>Child: Pass expanded environment
+</pre>
+<h2>Why <code>SHELL</code> is special</h2>
+<p><code>SHELL</code> demonstrates why a variable record needs more than a value.</p>
+<p>On Unix-like systems, Make reads <code>SHELL</code> from the environment but generally does not allow a makefile’s <code>SHELL</code> assignment to replace the shell used by Make itself in the same way ordinary variables work. The code preserves the original environment value in <code>shell_var</code>.</p>
+<p>At the same time, Make’s recipe environment may still be constructed according to its own export rules.</p>
+<p>On Windows, setting <code>SHELL</code> also triggers shell discovery. In <code>do_variable_definition()</code>, the Windows-specific path checks whether the requested shell can be found and may replace the stored value with the discovered executable path.</p>
+<p>Thus a <code>struct variable</code> can be involved in:</p>
+<ul>
+<li>Make-language expansion,</li>
+<li>process environment construction,</li>
+<li>shell selection,</li>
+<li>platform-specific path conversion.</li>
+</ul>
+<p>The record remains the common control point, while platform code supplies the special behavior.</p>
+<h2>Automatic variables use the same machinery</h2>
+<p>Automatic variables such as <code>$@</code>, <code>$&lt;</code>, <code>$^</code>, and <code>$*</code> are not handled by a separate expansion system. Before a recipe runs, <code>set_file_variables()</code> defines them in the target’s variable set:</p>
+<pre><code class="language-c">DEFINE_VARIABLE (&quot;&lt;&quot;, 1, less);
+DEFINE_VARIABLE (&quot;*&quot;, 1, star);
+DEFINE_VARIABLE (&quot;@&quot;, 1, at);
+DEFINE_VARIABLE (&quot;%&quot;, 1, percent);
+</code></pre>
+<p>These records use origin <code>o_automatic</code>:</p>
+<pre><code class="language-c">define_variable_for_file (name, len, value,
+                          o_automatic, 0, file)
+</code></pre>
+<p>The <code>o_automatic</code> origin is stronger than ordinary user definitions, which prevents a makefile from casually replacing Make’s current target information.</p>
+<p>For example, when building <code>obj/main.o</code>, Make may create records whose values are conceptually:</p>
+<pre><code class="language-text">@ = obj/main.o
+&lt; = main.c
+* = main
+</code></pre>
+<p>The same <code>lookup_variable()</code> and <code>variable_expand_for_file()</code> functions then make these values available to recipe expansion.</p>
+<h2>Recursive expansion and cycle detection</h2>
+<p>Recursive variables can refer to one another:</p>
+<pre><code class="language-make">A = $(B)
+B = $(A)
+</code></pre>
+<p>Without protection, expanding <code>A</code> would loop forever.</p>
+<p><code>recursively_expand_for_file()</code> uses fields in <code>struct variable</code> to detect this:</p>
+<pre><code class="language-c">if (v-&gt;expanding)
+  {
+    if (!v-&gt;exp_count)
+      OS (fatal, *expanding_var,
+          _(&quot;Recursive variable '%s' references itself (eventually)&quot;),
+          v-&gt;name);
+</code></pre>
+<p>Before expanding the value, it marks the variable:</p>
+<pre><code class="language-c">v-&gt;expanding = 1;
+value = allocated_variable_expand (v-&gt;value);
+v-&gt;expanding = 0;
+</code></pre>
+<p>The <code>expanding</code> bit is therefore a small “currently in progress” sign. It is like putting a temporary marker on a folder while opening it; if opening the same folder leads back to itself, Make can report a cycle instead of wandering forever.</p>
+<p><code>exp_count</code> permits controlled self-reference for special cases such as nested <code>call</code> operations. Normally, an uncontrolled recursive loop produces a fatal diagnostic.</p>
+<h2>Definition locations and diagnostics</h2>
+<p>When Make reads a makefile assignment, <code>try_variable_definition()</code> receives the current <code>floc</code>:</p>
+<pre><code class="language-c">vp = do_variable_definition (flocp, v.name, v.value,
+                             origin, v.flavor, target_var);
+</code></pre>
+<p><code>define_variable_in_set()</code> copies that location into the record:</p>
+<pre><code class="language-c">if (flocp != 0)
+  v-&gt;fileinfo = *flocp;
+</code></pre>
+<p>Later, the variable database printer uses it:</p>
+<pre><code class="language-c">if (v-&gt;fileinfo.filenm)
+  printf (_(&quot; (from '%s', line %lu)&quot;),
+          v-&gt;fileinfo.filenm,
+          v-&gt;fileinfo.lineno + v-&gt;fileinfo.offset);
+</code></pre>
+<p>This is especially useful with:</p>
+<pre><code class="language-sh">make -p
+</code></pre>
+<p>The output can show whether a variable came from:</p>
+<ul>
+<li>the environment,</li>
+<li>a built-in default,</li>
+<li>a makefile,</li>
+<li>the command line,</li>
+<li>or an <code>override</code> directive.</li>
+</ul>
+<p>It also shows whether the variable is recursive, appended, private, or automatic.</p>
+<h2>How to inspect variables from a makefile</h2>
+<p>GNU Make provides the <code>origin</code> and <code>flavor</code> functions:</p>
+<pre><code class="language-make">$(info CC origin: $(origin CC))
+$(info CC flavor: $(flavor CC))
+</code></pre>
+<p>For a command-line definition, the result might be:</p>
+<pre><code class="language-text">CC origin: command line
+CC flavor: recursive
+</code></pre>
+<p>The implementations in <code>function.c</code> simply look up the variable record and inspect its fields:</p>
+<pre><code class="language-c">struct variable *v = lookup_variable (argv[0], strlen (argv[0]));
+</code></pre>
+<p>The <code>origin</code> function maps <code>v-&gt;origin</code> to text such as <code>file</code>, <code>environment</code>, or <code>command line</code>.</p>
+<p>The <code>flavor</code> function checks the <code>recursive</code> flag:</p>
+<pre><code class="language-c">if (v-&gt;recursive)
+  o = variable_buffer_output (o, &quot;recursive&quot;, 9);
+else
+  o = variable_buffer_output (o, &quot;simple&quot;, 6);
+</code></pre>
+<p>These functions are useful when a build behaves unexpectedly. Instead of guessing which definition won, ask Make directly.</p>
+<h2>A complete precedence example</h2>
+<p>Suppose the environment contains:</p>
+<pre><code class="language-sh">CC=clang
+</code></pre>
+<p>The command line says:</p>
+<pre><code class="language-sh">make CC=gcc
+</code></pre>
+<p>The makefile contains:</p>
+<pre><code class="language-make">CC = cc
+override CFLAGS += -O2
+</code></pre>
+<p>The sequence is:</p>
+<ol>
+<li><code>main()</code> imports <code>CC=clang</code> with origin <code>o_env</code>.</li>
+<li>Command-line parsing defines <code>CC=gcc</code> with origin <code>o_command</code>.</li>
+<li>The makefile defines <code>CC=cc</code> with origin <code>o_file</code>.</li>
+<li><code>define_variable_in_set()</code> refuses to replace the command-line value with the weaker makefile value.</li>
+<li><code>override CFLAGS += -O2</code> uses origin <code>o_override</code>, so it can supersede a command-line <code>CFLAGS</code> value.</li>
+<li>Recipe expansion sees <code>CC=gcc</code>.</li>
+<li>The child environment receives the variables that pass export checks.</li>
+</ol>
+<p>This is the important mental model:</p>
+<pre><code class="language-text">The last definition does not automatically win.
+The strongest applicable definition wins.
+</code></pre>
+<h2>Putting the pieces together</h2>
+<p>A variable definition travels through Make like this:</p>
+<pre><code class="language-text">text in a makefile
+        ↓
+parse assignment operator
+        ↓
+choose flavor and origin
+        ↓
+store struct variable in a hash table
+        ↓
+select a visible variable set
+        ↓
+expand immediately or later
+        ↓
+optionally export to a recipe
+</code></pre>
+<p>Different parts of the code handle different stages:</p>
+<ul>
+<li><a href="../src/read.c"><code>src/read.c</code></a> recognizes assignments and target-specific syntax.</li>
+<li><a href="../src/variable.c"><code>src/variable.c</code></a> stores definitions, compares origins, manages scopes, and builds environments.</li>
+<li><a href="../src/expand.c"><code>src/expand.c</code></a> expands recursive values and detects cycles.</li>
+<li><a href="../src/function.c"><code>src/function.c</code></a> exposes variable metadata through <code>origin</code> and <code>flavor</code>.</li>
+<li><a href="../src/commands.c"><code>src/commands.c</code></a> creates automatic variables for a target.</li>
+<li><a href="../src/main.c"><code>src/main.c</code></a> imports environment variables and records command-line definitions.</li>
+</ul>
+<p>The <code>struct variable</code> record is the shared ledger connecting all of them.</p>
+<h2>Key takeaways</h2>
+<ul>
+<li>A Make variable stores much more than a name and string value.</li>
+<li><code>recursive</code> controls whether the value is expanded when used.</li>
+<li><code>flavor</code> distinguishes <code>=</code>, <code>:=</code>, <code>+=</code>, <code>?=</code>, <code>!=</code>, and related assignments.</li>
+<li><code>origin</code> controls precedence between defaults, environments, makefiles, command lines, and overrides.</li>
+<li>Variables live in hash-table-backed variable sets.</li>
+<li>A linked set list provides global, target-specific, parent, pattern-specific, and temporary scopes.</li>
+<li>Target-specific variables can be inherited or marked <code>private</code>.</li>
+<li>Pattern-specific variables are applied when a concrete target matches a pattern.</li>
+<li>Export settings determine which variables enter a recipe’s environment.</li>
+<li>Automatic variables use the same variable machinery as ordinary variables.</li>
+<li>Expansion state prevents uncontrolled recursive loops.</li>
+<li><code>origin</code>, <code>flavor</code>, and <code>make -p</code> help diagnose which definition Make selected.</li>
+</ul>
+<p>Now that you understand how Make stores variable records, chooses between competing definitions, and builds target-specific contexts, the next question is how those stored values are actually expanded into text. That is the subject of <a href="03_variable_expand.html">variable_expand</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="01_read_all_makefiles.html">&larr; read_all_makefiles</a></span>
+    <span><a href="03_variable_expand.html">variable_expand &rarr;</a></span>
+  </nav>
+</body>
+</html>

@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>read_all_makefiles — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 1: read_all_makefiles</h1>
+<p>Imagine starting a construction project with several instruction manuals on the table:</p>
+<ul>
+<li>one manual was named explicitly by the project manager,</li>
+<li>one is the standard manual found in the room,</li>
+<li>another is an optional supplement,</li>
+<li>and a missing supplement might need to be generated before it can be read.</li>
+</ul>
+<p>GNU Make faces the same problem. Before it can decide whether a target is out of date, it must discover every relevant makefile, read them in the correct order, and combine their rules and variables into one internal build plan.</p>
+<p>This is the job of <code>read_all_makefiles</code>.</p>
+<blockquote>
+<p><strong>Description:</strong> This is the entry point for loading and interpreting makefiles. It finds explicit, default, included, and generated makefiles, then feeds their contents to the parser. Think of it as opening a collection of instruction manuals and combining their definitions into one build plan.</p>
+</blockquote>
+<h2>Where the function fits</h2>
+<p>The entry point is declared in <a href="../src/dep.h"><code>src/dep.h</code></a>:</p>
+<pre><code class="language-c">struct goaldep *read_all_makefiles (const char **makefiles);
+</code></pre>
+<p>Its implementation is in <a href="../src/read.c"><code>src/read.c</code></a>:</p>
+<pre><code class="language-c">struct goaldep *
+read_all_makefiles (const char **makefiles)
+{
+  unsigned int num_makefiles = 0;
+</code></pre>
+<p>The function accepts a null-terminated list of filenames. This list comes from <code>-f</code> command-line options. It returns a chain of <code>struct goaldep</code> objects describing makefiles that may need to be rebuilt.</p>
+<p>The call happens in <code>main()</code>:</p>
+<pre><code class="language-c">read_files = read_all_makefiles
+  (makefiles == 0 ? 0 : makefiles-&gt;list);
+</code></pre>
+<p>At this point, <code>main()</code> has already:</p>
+<ul>
+<li>parsed command-line options,</li>
+<li>loaded environment variables,</li>
+<li>changed to the requested <code>-C</code> directory,</li>
+<li>constructed the include search path,</li>
+<li>initialized variables and built-in data.</li>
+</ul>
+<p>That preparation matters. For example, <code>read_all_makefiles()</code> must search for included files using the current directory and the include directories established by <code>construct_include_path()</code>.</p>
+<h2>The high-level flow</h2>
+<p>The loading process looks like this:</p>
+<pre class="mermaid">sequenceDiagram
+    participant Main as Main
+    participant Reader as Reader
+    participant Files as File system
+    participant Parser as Parser
+    participant Updater as Makefile updater
+
+    Main->>Reader: Request all makefiles
+    Reader->>Files: Look for requested and default files
+    Reader->>Parser: Evaluate each readable makefile
+    Parser->>Reader: Discover included makefiles
+    Reader->>Updater: Return files that may need rebuilding
+    Updater->>Main: Report rebuild and restart decisions
+</pre>
+<p>The important idea is that reading and rebuilding are separate phases:</p>
+<ol>
+<li><code>read_all_makefiles()</code> discovers and reads what is currently available.</li>
+<li>It also records missing makefiles that might be generated.</li>
+<li><code>main()</code> later calls <a href="07_update_goal_chain.html"><code>update_goal_chain</code></a> to try to rebuild them.</li>
+<li>If a makefile changed, Make re-executes itself and reads everything again.</li>
+</ol>
+<p>This is similar to reading a configuration file, discovering that an imported configuration file is generated, generating it, and then restarting configuration loading so the new settings take effect.</p>
+<h2>First step: initialize <code>MAKEFILE_LIST</code></h2>
+<p>The first action is:</p>
+<pre><code class="language-c">define_variable_cname (&quot;MAKEFILE_LIST&quot;, &quot;&quot;, o_file, 0);
+</code></pre>
+<p><code>MAKEFILE_LIST</code> is a special make variable containing the makefiles that have been read. Each successful call to <code>eval_makefile()</code> appends another filename to it.</p>
+<p>For example, if Make reads:</p>
+<pre><code class="language-make"># Makefile
+include config.mk
+</code></pre>
+<p>then <code>MAKEFILE_LIST</code> eventually contains something like:</p>
+<pre><code class="language-text">Makefile config.mk
+</code></pre>
+<p>This variable is useful inside makefiles for inspecting the current loading history. It also helps Make distinguish “no makefile was found” from “a makefile was found but defined no targets.”</p>
+<p>The variable itself is stored using the variable machinery described in <a href="02_struct_variable.html"><code>struct variable</code></a>. Its value is not necessarily expanded immediately; normal make variable expansion rules still apply.</p>
+<h2>Reading files from <code>MAKEFILES</code></h2>
+<p>GNU Make has an environment or make variable named <code>MAKEFILES</code>. Its value is a list of additional files that should be read before the normal makefile.</p>
+<p>The code expands that variable first:</p>
+<pre><code class="language-c">value = allocated_variable_expand (&quot;$(MAKEFILES)&quot;);
+p = value;
+</code></pre>
+<p>This is important because the value may contain references such as:</p>
+<pre><code class="language-make">MAKEFILES = $(HOME)/company.mk
+</code></pre>
+<p>The expansion uses the variable expansion system covered in <a href="03_variable_expand.html"><code>variable_expand</code></a>.</p>
+<p>The list is then split into filenames:</p>
+<pre><code class="language-c">while ((name = find_next_token
+        ((const char **)&amp;p, &amp;length)) != 0)
+  {
+    if (*p != '\0')
+      *p++ = '\0';
+</code></pre>
+<p>Each name is sent to <code>eval_makefile()</code> with three flags:</p>
+<pre><code class="language-c">eval_makefile (strcache_add (name),
+               RM_NO_DEFAULT_GOAL
+               | RM_INCLUDED
+               | RM_DONTCARE);
+</code></pre>
+<p>These flags say:</p>
+<ul>
+<li><code>RM_NO_DEFAULT_GOAL</code>: targets from this file must not become the default goal.</li>
+<li><code>RM_INCLUDED</code>: search the include-file directories if the file is not in the current directory.</li>
+<li><code>RM_DONTCARE</code>: do not treat a missing file as a fatal error.</li>
+</ul>
+<p>Why is <code>MAKEFILES</code> treated this way? Think of it as a company-wide policy manual. It can define variables and rules, but it should not unexpectedly decide what the project’s main task is.</p>
+<h2>Reading explicitly named makefiles</h2>
+<p>Next, <code>read_all_makefiles()</code> handles the filenames supplied with <code>-f</code>.</p>
+<p>For example:</p>
+<pre><code class="language-sh">make -f common.mk -f platform.mk all
+</code></pre>
+<p>The <code>makefiles</code> array contains <code>common.mk</code> and <code>platform.mk</code>. The function reads each one:</p>
+<pre><code class="language-c">while (*makefiles != 0)
+  {
+    struct goaldep *d = eval_makefile (*makefiles, 0);
+</code></pre>
+<p>The zero flag means that an explicitly named makefile is:</p>
+<ul>
+<li>not an included file,</li>
+<li>allowed to establish the default goal,</li>
+<li>not automatically “optional.”</li>
+</ul>
+<p>The function also checks <code>errno</code>:</p>
+<pre><code class="language-c">if (errno)
+  perror_with_name (&quot;&quot;, *makefiles);
+</code></pre>
+<p>A failed explicit makefile is different from a missing optional include. If the user explicitly requested <code>platform.mk</code>, Make should report a useful error instead of silently continuing.</p>
+<p>Then the code updates the caller’s pointer:</p>
+<pre><code class="language-c">*makefiles = dep_name (d);
+++num_makefiles;
+++makefiles;
+</code></pre>
+<p>The <code>goaldep</code> entry owns the canonical filename stored by Make. Reusing that name ensures later stages see the same string that the file database uses.</p>
+<h2>Choosing a default makefile</h2>
+<p>If the user did not provide any <code>-f</code> options, Make searches a platform-specific list of conventional names.</p>
+<p>On a typical Unix-like system, the candidates are:</p>
+<pre><code class="language-text">GNUmakefile
+makefile
+Makefile
+</code></pre>
+<p>On Windows, the list also includes names such as <code>makefile.mak</code>.</p>
+<p>The relevant branch is:</p>
+<pre><code class="language-c">if (num_makefiles == 0)
+  {
+    static const char *default_makefiles[] =
+      { &quot;GNUmakefile&quot;, &quot;makefile&quot;, &quot;Makefile&quot;, 0 };
+</code></pre>
+<p>Make checks the candidates in order:</p>
+<pre><code class="language-c">while (*p != 0 &amp;&amp; !file_exists_p (*p))
+  ++p;
+</code></pre>
+<p>This gives the names a priority. If both <code>GNUmakefile</code> and <code>Makefile</code> exist, <code>GNUmakefile</code> wins.</p>
+<p>When a candidate exists, it is read normally:</p>
+<pre><code class="language-c">if (*p != 0)
+  {
+    eval_makefile (*p, 0);
+</code></pre>
+<p>Only one default makefile is selected. The search does not combine all matching conventional names.</p>
+<p>This is like looking for a primary instruction manual: if the first preferred manual exists, you do not also open every lower-priority manual automatically.</p>
+<h2>Recording missing default files</h2>
+<p>The more interesting case is when no default makefile exists.</p>
+<p>Instead of immediately failing, Make adds every default candidate to the <code>read_files</code> chain:</p>
+<pre><code class="language-c">for (p = default_makefiles; *p != 0; ++p)
+  {
+    struct goaldep *d = alloc_goaldep ();
+    d-&gt;file = enter_file (strcache_add (*p));
+</code></pre>
+<p>Each entry is marked as optional:</p>
+<pre><code class="language-c">d-&gt;flags = RM_DONTCARE;
+d-&gt;next = read_files;
+read_files = d;
+</code></pre>
+<p>Why record files that do not exist?</p>
+<p>Because one of them might be generated by a rule. Consider this setup:</p>
+<pre><code class="language-make"># GNUmakefile is absent
+
+GNUmakefile: generator.sh
+	./generator.sh &gt; GNUmakefile
+</code></pre>
+<p>The first invocation cannot read <code>GNUmakefile</code>, but it can still discover a rule capable of creating it if that rule is available through another source. By recording the candidate, Make gives the later update phase an opportunity to build it.</p>
+<p>The <code>RM_DONTCARE</code> flag means failure to create one of these default candidates should not automatically produce a “Makefile not found” error. The user may have a project with no makefile at all, or the candidate may simply be irrelevant.</p>
+<p>The <code>struct file</code> entry created by <code>enter_file()</code> is part of the file database discussed in <a href="04_struct_file.html"><code>struct file</code></a>. The returned <code>goaldep</code> is a temporary “please consider this file” wrapper, not the same thing as the target’s complete rule record.</p>
+<h2>What <code>eval_makefile()</code> does</h2>
+<p><code>read_all_makefiles()</code> delegates the actual reading to the private helper <code>eval_makefile()</code>.</p>
+<p>The helper creates a dependency record:</p>
+<pre><code class="language-c">deps = alloc_goaldep ();
+deps-&gt;next = read_files;
+read_files = deps;
+</code></pre>
+<p>Notice that it inserts at the front of the list. This means the internal <code>read_files</code> chain is built in reverse order.</p>
+<p>For example, if Make reads:</p>
+<pre><code class="language-text">first.mk
+second.mk
+third.mk
+</code></pre>
+<p>the chain may temporarily be:</p>
+<pre><code class="language-text">third.mk -&gt; second.mk -&gt; first.mk
+</code></pre>
+<p>Later, <code>main()</code> reverses the chain before trying to rebuild makefiles, so rebuild attempts happen in the order the files were read.</p>
+<p>That ordering is important. If <code>first.mk</code> defines a variable used to generate <code>second.mk</code>, Make must preserve the original reading relationship when it decides what to update.</p>
+<h2>Opening and searching for the file</h2>
+<p><code>eval_makefile()</code> attempts to open the requested name:</p>
+<pre><code class="language-c">errno = 0;
+ENULLLOOP (ebuf.fp, fopen (filename, &quot;r&quot;));
+deps-&gt;error = errno;
+</code></pre>
+<p><code>ENULLLOOP</code> retries an operation interrupted by a signal. This is a small portability detail, but it prevents a temporary signal interruption from looking like a missing makefile.</p>
+<p>For files marked <code>RM_INCLUDED</code>, a missing local file triggers a search through the include path:</p>
+<pre><code class="language-c">if (ebuf.fp == NULL &amp;&amp; deps-&gt;error == ENOENT
+    &amp;&amp; include_directories
+    &amp;&amp; ANY_SET (flags, RM_INCLUDED))
+</code></pre>
+<p>The search constructs candidate names such as:</p>
+<pre><code class="language-text">/usr/local/include/config.mk
+/usr/include/config.mk
+</code></pre>
+<p>The include directories come from:</p>
+<ul>
+<li><code>-I</code> command-line options,</li>
+<li>standard installation directories,</li>
+<li>platform-specific defaults.</li>
+</ul>
+<p>They were prepared earlier by <code>construct_include_path()</code>.</p>
+<p>This distinction matters:</p>
+<ul>
+<li>an explicit <code>-f config.mk</code> normally means “open exactly this file”;</li>
+<li>an <code>include config.mk</code> directive means “open it here, or search the include path.”</li>
+</ul>
+<h2>Canonicalizing the file record</h2>
+<p>After opening or failing to open the file, Make stores the final name in the string cache:</p>
+<pre><code class="language-c">filename = strcache_add (filename);
+deps-&gt;file = lookup_file (filename);
+</code></pre>
+<p>If no existing file record is found, it creates one:</p>
+<pre><code class="language-c">if (deps-&gt;file == 0)
+  deps-&gt;file = enter_file (filename);
+</code></pre>
+<p>The file is marked explicit:</p>
+<pre><code class="language-c">deps-&gt;file-&gt;is_explicit = 1;
+</code></pre>
+<p>This flag has consequences later during implicit rule search. A file mentioned as a makefile is not treated like an arbitrary intermediate file discovered by pattern matching.</p>
+<p>The name is cached because many internal structures compare filenames repeatedly. The string cache acts like a shared label maker: rather than allocating a new copy of the same label everywhere, Make can reuse one canonical string.</p>
+<h2>Evaluating the contents</h2>
+<p>If the file opened successfully, <code>eval_makefile()</code> adds it to <code>MAKEFILE_LIST</code>:</p>
+<pre><code class="language-c">do_variable_definition (&amp;ebuf.floc, &quot;MAKEFILE_LIST&quot;,
+                        filename, o_file, f_append_value, 0);
+</code></pre>
+<p>It then prepares an input buffer:</p>
+<pre><code class="language-c">ebuf.size = 200;
+ebuf.buffer = ebuf.bufnext = ebuf.bufstart = xmalloc (ebuf.size);
+</code></pre>
+<p>Finally, it establishes the current source location and invokes the parser:</p>
+<pre><code class="language-c">reading_file = &amp;ebuf.floc;
+eval (&amp;ebuf, !(flags &amp; RM_NO_DEFAULT_GOAL));
+reading_file = curfile;
+</code></pre>
+<p>The second argument to <code>eval()</code> determines whether targets in this file may establish the default goal.</p>
+<p>The parser in <code>eval()</code> reads logical lines, recognizes assignments, conditionals, includes, targets, prerequisites, and recipes, and records the resulting information in Make’s databases. The eventual target and prerequisite relationships are represented by the structures explained in <a href="05_struct_dep.html"><code>struct dep</code></a>, <a href="06_struct_rule.html"><code>struct rule</code></a>, and <a href="08_struct_commands.html"><code>struct commands</code></a>.</p>
+<p>The parser also handles nested include directives. When it encounters:</p>
+<pre><code class="language-make">include generated.mk
+</code></pre>
+<p>it calls <code>eval_makefile()</code> again. In other words, <code>read_all_makefiles()</code> begins the process, but the parser can expand the collection while it is walking through each manual.</p>
+<h2>Included makefiles and generated makefiles</h2>
+<p>An included file uses flags assembled in the parser:</p>
+<pre><code class="language-c">unsigned short flags = (RM_INCLUDED | RM_NO_TILDE
+                        | (noerror ? RM_DONTCARE : 0)
+                        | (set_default ? 0 : RM_NO_DEFAULT_GOAL));
+</code></pre>
+<p>The meanings are:</p>
+<ul>
+<li><code>RM_INCLUDED</code>: search the include path if necessary.</li>
+<li><code>RM_NO_TILDE</code>: the parser already handled tilde expansion.</li>
+<li><code>RM_DONTCARE</code>: used for <code>-include</code> and <code>sinclude</code>.</li>
+<li><code>RM_NO_DEFAULT_GOAL</code>: prevents nested files from stealing the default goal when appropriate.</li>
+</ul>
+<p>A normal <code>include</code> is expected to exist. A <code>-include</code> or <code>sinclude</code> file is optional:</p>
+<pre><code class="language-make">-include generated-config.mk
+</code></pre>
+<p>If <code>generated-config.mk</code> is missing, Make records it as a file that may need rebuilding, but does not immediately stop.</p>
+<p>This is how generated dependency files commonly work:</p>
+<pre><code class="language-make">-include objects/main.d objects/util.d
+</code></pre>
+<p>The <code>.d</code> files may not exist during the first invocation. Make can read the rest of the project, discover rules for producing them, rebuild them, and then restart so the newly generated prerequisites become part of the build plan.</p>
+<h2>The returned chain is not the goal list</h2>
+<p>A subtle but important point: <code>read_all_makefiles()</code> returns a <code>struct goaldep</code> chain, but these are not the user’s requested goals such as <code>all</code> or <code>install</code>.</p>
+<p>They are the makefiles that may need to be updated before ordinary goals are built.</p>
+<p>The distinction is:</p>
+<ul>
+<li>command-line targets are stored in the <code>goals</code> chain in <code>main.c</code>;</li>
+<li>makefiles to rebuild are returned through <code>read_files</code>;</li>
+<li>both chains use dependency-shaped structures, but they serve different phases.</li>
+</ul>
+<p>This is why <code>main()</code> first handles the returned chain, possibly rebuilding and re-executing Make, and only afterward updates the user’s requested goals.</p>
+<p>The update phase uses <a href="07_update_goal_chain.html"><code>update_goal_chain</code></a>, which walks the makefile records just as it later walks ordinary target records. During this phase, Make temporarily sets <code>rebuilding_makefiles</code> so options such as <code>-n</code>, <code>-q</code>, and <code>-t</code> receive special treatment.</p>
+<h2>Why Make re-executes itself</h2>
+<p>Suppose an included makefile is generated:</p>
+<pre><code class="language-make">-include config.mk
+
+config.mk: config.in
+	./configure-config &lt; $&lt; &gt; $@
+</code></pre>
+<p>The first pass might proceed like this:</p>
+<ol>
+<li><code>read_all_makefiles()</code> reads the main makefile.</li>
+<li>The parser notices <code>-include config.mk</code>.</li>
+<li><code>config.mk</code> is missing, so it is recorded as optional.</li>
+<li><code>main()</code> tries to update the recorded makefile.</li>
+<li>The recipe creates <code>config.mk</code>.</li>
+<li>Make notices that a makefile changed.</li>
+<li>Make re-executes itself.</li>
+<li>The second process reads the now-existing <code>config.mk</code>.</li>
+<li>The new variables and rules affect the real build.</li>
+</ol>
+<p>Re-execution is safer than trying to patch the parser’s state in place. It is like closing a program after installing a new plugin, then starting it again so every component sees the plugin from initialization onward.</p>
+<p>The restart logic also preserves special command-line details, including temporary filenames used when standard input was supplied as a makefile. That preparation occurs in <code>main.c</code> before <code>read_all_makefiles()</code> is called.</p>
+<h2>A compact mental model</h2>
+<p>You can remember <code>read_all_makefiles()</code> as a librarian with four shelves:</p>
+<ol>
+<li>
+<p><strong>Preloaded references</strong><br />
+Files from <code>MAKEFILES</code>, read first and not allowed to choose the default goal.</p>
+</li>
+<li>
+<p><strong>Explicit requests</strong><br />
+Files named with <code>-f</code>, read exactly as requested and treated as required.</p>
+</li>
+<li>
+<p><strong>Default candidates</strong><br />
+Conventional names such as <code>GNUmakefile</code> and <code>Makefile</code>, searched in priority order.</p>
+</li>
+<li>
+<p><strong>Nested and generated references</strong><br />
+Files discovered through <code>include</code>, <code>-include</code>, or rules that can create missing makefiles.</p>
+</li>
+</ol>
+<p>For every readable file, the librarian:</p>
+<ul>
+<li>opens it,</li>
+<li>records its name in <code>MAKEFILE_LIST</code>,</li>
+<li>establishes source-location information,</li>
+<li>sends its contents to <code>eval()</code>,</li>
+<li>and lets the parser add variables, targets, prerequisites, and recipes to the shared build database.</li>
+</ul>
+<p>For every missing but potentially useful file, the librarian leaves a note for the update phase.</p>
+<h2>Key takeaways</h2>
+<ul>
+<li><code>read_all_makefiles()</code> is called once during startup from <code>main()</code>.</li>
+<li>It initializes <code>MAKEFILE_LIST</code>.</li>
+<li>It reads <code>MAKEFILES</code> entries before ordinary makefiles.</li>
+<li>Explicit <code>-f</code> files take precedence over default discovery.</li>
+<li>Default makefile names are searched in platform-specific order.</li>
+<li>Missing default and optional included files are recorded for possible rebuilding.</li>
+<li><code>eval_makefile()</code> performs opening, include-path searching, bookkeeping, and parsing.</li>
+<li>Nested <code>include</code> directives call back into the same loading machinery.</li>
+<li>The returned chain describes makefiles to update, not ordinary build goals.</li>
+<li>If a makefile changes, Make re-executes itself and starts the loading process again.</li>
+</ul>
+<p>Now that you understand how Make gathers the manuals, records their source, and combines their contents, the next question is: where do all those variable definitions live, and how does Make decide which definition wins? That is the subject of <a href="02_struct_variable.html">struct variable</a>.</p>
+
+  <nav class="chapter-nav">
+    <span>&nbsp;</span>
+    <span><a href="02_struct_variable.html">struct variable &rarr;</a></span>
+  </nav>
+</body>
+</html>
