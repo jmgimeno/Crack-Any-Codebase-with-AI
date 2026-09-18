@@ -1,0 +1,780 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>variable_set_list — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 2: variable_set_list</h1>
+<p>Why can the same spelling mean different things while Make is building different targets?</p>
+<p>Consider this Makefile:</p>
+<pre><code class="language-make">CFLAGS = -O2
+
+debug: CFLAGS = -O0 -g
+release: CFLAGS = -O3
+</code></pre>
+<p>When Make builds <code>debug</code>, <code>$(CFLAGS)</code> should be <code>-O0 -g</code>. When it builds <code>release</code>, it should be <code>-O3</code>. Everywhere else, it should remain <code>-O2</code>.</p>
+<p>Make cannot solve that by keeping one global <code>CFLAGS</code> value and repeatedly rewriting it. Parallel builds, prerequisite inheritance, recursive expansion, and automatic variables such as <code>$@</code> would quickly turn that approach into a pile of race-prone confusion.</p>
+<p>Instead, GNU Make asks a more useful question:</p>
+<blockquote>
+<p>Which definitions are visible <strong>from the current place</strong>?</p>
+</blockquote>
+<p>That question is answered by <code>struct variable_set_list</code>.</p>
+<p>A variable set list is a chain of scopes. Think of it as transparent sheets stacked on top of a page:</p>
+<ul>
+<li>each sheet can define a few names;</li>
+<li>reading starts at the top sheet;</li>
+<li>a name found on the top sheet hides lower definitions;</li>
+<li>if a sheet does not mention the name, Make looks through it;</li>
+<li>some sheets represent a parent target, which changes how <code>private</code> variables behave.</li>
+</ul>
+<p>This chapter connects the individual variable records from <a href="01_struct_variable.html">struct variable</a> to the places where Make stores and finds those records.</p>
+<h2>The three pieces: variable, set, and list</h2>
+<p>The previous chapter introduced one <code>struct variable</code>: one labeled definition with a value, origin, flavor, and flags.</p>
+<p>GNU Make groups those definitions into a <code>struct variable_set</code>:</p>
+<pre><code class="language-c">struct variable_set
+  {
+    struct hash_table table;
+  };
+</code></pre>
+<p>A set is one scope’s dictionary. Its hash table maps a name such as <code>CFLAGS</code> to a <code>struct variable</code>.</p>
+<p>Then Make chains sets with <code>struct variable_set_list</code>:</p>
+<pre><code class="language-c">struct variable_set_list
+  {
+    struct variable_set_list *next;
+    struct variable_set *set;
+    int next_is_parent;
+  };
+</code></pre>
+<p>The fields are small, but they describe the whole lookup model:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>set</code></td>
+<td>The current layer’s hash table of definitions</td>
+</tr>
+<tr>
+<td><code>next</code></td>
+<td>The less-specific layer below it</td>
+</tr>
+<tr>
+<td><code>next_is_parent</code></td>
+<td>The next layer belongs to a parent target</td>
+</tr>
+</tbody>
+</table>
+<p>So the data structure is not a list of variables. It is a list of <strong>places where variables may live</strong>.</p>
+<p>A target can therefore see a chain like this:</p>
+<pre><code class="language-text">automatic variables
+    ↓
+target-specific variables
+    ↓
+matching pattern-specific variables
+    ↓
+parent target variables
+    ↓
+global variables
+</code></pre>
+<p>Not every target has every layer, but this is the mental model to keep.</p>
+<h2>The global scope is the floor</h2>
+<p>GNU Make has one global variable set:</p>
+<pre><code class="language-c">static struct variable_set global_variable_set;
+</code></pre>
+<p>It also creates a list node that points at that set:</p>
+<pre><code class="language-c">static struct variable_set_list global_setlist
+  = { 0, &amp;global_variable_set, 0 };
+</code></pre>
+<p>And, initially, all lookup begins there:</p>
+<pre><code class="language-c">struct variable_set_list *current_variable_set_list = &amp;global_setlist;
+</code></pre>
+<p>Picture <code>global_setlist</code> as the ground floor of a building. It contains definitions imported from the environment, supplied on the command line, created by built-in defaults, and read from ordinary Makefile assignments.</p>
+<p>For example:</p>
+<pre><code class="language-make">MODE = normal
+</code></pre>
+<p>usually creates a <code>struct variable</code> in the global variable set.</p>
+<p>A later lookup starts from <code>current_variable_set_list</code>. At startup, that pointer refers to the global list node, so global lookup is all there is.</p>
+<p>The name “current” matters. Make changes this pointer temporarily when it expands a recipe for a target, enters a function-local scope, or evaluates target-specific definitions.</p>
+<h2>Lookup is simple: search downward</h2>
+<p>The central routine is <code>lookup_variable()</code> in <code>src/variable.c</code>.</p>
+<p>It first creates a lightweight lookup key:</p>
+<pre><code class="language-c">var_key.name = (char *) name;
+var_key.length = (unsigned int) length;
+</code></pre>
+<p>Then it walks the list from the current scope toward the global scope:</p>
+<pre><code class="language-c">for (setlist = current_variable_set_list;
+     setlist != 0; setlist = setlist-&gt;next)
+  {
+    const struct variable_set *set = setlist-&gt;set;
+</code></pre>
+<p>For each scope, Make searches that scope’s hash table:</p>
+<pre><code class="language-c">v = hash_find_item ((struct hash_table *) &amp;set-&gt;table, &amp;var_key);
+
+if (v &amp;&amp; (!is_parent || !v-&gt;private_var))
+  return v;
+</code></pre>
+<p>This is the entire “topmost visible definition wins” rule.</p>
+<p>Notice what lookup does <strong>not</strong> do:</p>
+<ul>
+<li>it does not compare variable origins across scopes;</li>
+<li>it does not merge ordinary values from every scope;</li>
+<li>it does not search the entire chain and choose the strongest origin.</li>
+</ul>
+<p>Scope comes first. If a visible definition exists in the current set, that definition wins. The variable’s origin still controls whether a <em>new assignment into that same set</em> may replace it, as explained in <a href="01_struct_variable.html">struct variable</a>.</p>
+<p>That distinction is crucial:</p>
+<pre><code class="language-text">Scope answers: which definition do we see?
+Origin answers: may this definition replace another in one set?
+</code></pre>
+<p>A target-specific definition is a separate note on a higher transparent sheet. It does not have to beat the global note through origin comparison just to be visible.</p>
+<h2>A concrete lookup walk</h2>
+<p>Suppose Make is preparing a recipe for <code>debug</code>:</p>
+<pre><code class="language-make">MODE = normal
+
+%.dbg: MODE = pattern
+
+debug: MODE = target
+</code></pre>
+<p>For target <code>debug</code>, the chain conceptually becomes:</p>
+<pre><code class="language-text">debug target variables: MODE = target
+pattern variables:      MODE = pattern
+global variables:       MODE = normal
+</code></pre>
+<p>A lookup for <code>MODE</code> stops immediately:</p>
+<pre><code class="language-text">search debug layer     found target
+result                 target
+</code></pre>
+<p>If <code>debug</code> had no target-specific <code>MODE</code>, Make would continue:</p>
+<pre><code class="language-text">search debug layer     not found
+search pattern layer   found pattern
+result                 pattern
+</code></pre>
+<p>And if neither specific layer defined it:</p>
+<pre><code class="language-text">search debug layer     not found
+search pattern layer   not found
+search global layer    found normal
+result                 normal
+</code></pre>
+<p>This is like asking for a document in a stack of folders. You open the desk drawer first, then the team cabinet, then the company archive. The first matching document is the one you use.</p>
+<h2>Target-specific variables belong to files</h2>
+<p>A target is represented by <code>struct file</code>, covered more fully in <a href="05_struct_file.html">struct file</a>. For this chapter, the important field is:</p>
+<pre><code class="language-c">struct variable_set_list *variables;
+</code></pre>
+<p>Each target may own a variable-set list.</p>
+<p>When Make parses this:</p>
+<pre><code class="language-make">app: CFLAGS = -DAPP
+</code></pre>
+<p><code>read.c</code> recognizes that the text after <code>app:</code> is a target-specific assignment. It calls <code>record_target_var()</code>.</p>
+<p>That function makes sure the target has a variable context:</p>
+<pre><code class="language-c">initialize_file_variables (f, 1);
+
+current_variable_set_list = f-&gt;variables;
+v = try_variable_definition (flocp, defn, origin, 1);
+current_variable_set_list = global;
+</code></pre>
+<p>The temporary switch is deliberate:</p>
+<ol>
+<li>initialize <code>app</code>’s variable chain;</li>
+<li>make <code>app</code>’s scope the current scope;</li>
+<li>define <code>CFLAGS</code> into its top variable set;</li>
+<li>restore the original global context.</li>
+</ol>
+<p>The final <code>1</code> passed to <code>try_variable_definition()</code> means this is a target-variable definition. That affects operations such as <code>+=</code>, which must preserve target-local append behavior.</p>
+<p>The definition is also marked:</p>
+<pre><code class="language-c">v-&gt;per_target = 1;
+</code></pre>
+<p>That flag records that this variable belongs to a target context rather than being an ordinary global definition.</p>
+<h2>Building a target’s base chain</h2>
+<p><code>initialize_file_variables()</code> constructs the chain for a target.</p>
+<p>If the target has no variable set yet, Make allocates one:</p>
+<pre><code class="language-c">l-&gt;set = xmalloc (sizeof (struct variable_set));
+hash_init (&amp;l-&gt;set-&gt;table, PERFILE_VARIABLE_BUCKETS,
+           variable_hash_1, variable_hash_2, variable_hash_cmp);
+</code></pre>
+<p>This top set is the target’s own private dictionary. It is intentionally much smaller than the global variable table:</p>
+<pre><code class="language-c">#define PERFILE_VARIABLE_BUCKETS 23
+</code></pre>
+<p>A target usually has only a handful of special definitions: perhaps a target-specific <code>CFLAGS</code>, an exported setting, and later automatic variables.</p>
+<p>After establishing the target’s own set, Make chooses what sits below it.</p>
+<p>For a target with no parent, the chain ends at global variables:</p>
+<pre><code class="language-c">if (file-&gt;parent == 0)
+  l-&gt;next = &amp;global_setlist;
+</code></pre>
+<p>Conceptually:</p>
+<pre><code class="language-text">target variables → global variables
+</code></pre>
+<p>But a prerequisite being built for another target gets a different chain:</p>
+<pre><code class="language-c">initialize_file_variables (file-&gt;parent, reading);
+l-&gt;next = file-&gt;parent-&gt;variables;
+</code></pre>
+<p>Conceptually:</p>
+<pre><code class="language-text">prerequisite variables → parent target variables → global variables
+</code></pre>
+<p>Finally, Make records that this next link crosses into a parent context:</p>
+<pre><code class="language-c">l-&gt;next_is_parent = 1;
+</code></pre>
+<p>That one bit supports inherited target-specific variables and the <code>private</code> modifier.</p>
+<h2>Parent-target inheritance</h2>
+<p>Target-specific variables propagate to prerequisites by default.</p>
+<pre><code class="language-make">program: CFLAGS = -DPROGRAM
+program: main.o util.o
+
+main.o util.o:
+	@echo $@ uses $(CFLAGS)
+</code></pre>
+<p>When Make builds <code>main.o</code> as a prerequisite of <code>program</code>, it can see <code>program</code>’s variable layer. Therefore both prerequisite recipes print:</p>
+<pre><code class="language-text">main.o uses -DPROGRAM
+util.o uses -DPROGRAM
+</code></pre>
+<p>This is not done by copying <code>CFLAGS = -DPROGRAM</code> into every prerequisite’s own table. Instead, the prerequisite’s scope chain points toward its parent’s scope.</p>
+<p>Like a child standing on a step stool, <code>main.o</code> can see the labels on <code>program</code>’s shelf without owning those labels itself.</p>
+<p>This design has two useful properties:</p>
+<ul>
+<li>it avoids copying variable definitions across an entire dependency graph;</li>
+<li>it preserves the ability for a prerequisite to define its own more-specific value.</li>
+</ul>
+<p>For example:</p>
+<pre><code class="language-make">program: CFLAGS = -DPROGRAM
+program: main.o util.o
+
+main.o: CFLAGS = -DMAIN
+</code></pre>
+<p>Then the lookup chains differ:</p>
+<pre><code class="language-text">main.o variables → program variables → globals
+util.o variables → program variables → globals
+</code></pre>
+<p>So <code>main.o</code> sees <code>-DMAIN</code>, while <code>util.o</code> inherits <code>-DPROGRAM</code>.</p>
+<h2><code>private</code> closes the inheritance window</h2>
+<p>Now add <code>private</code>:</p>
+<pre><code class="language-make">program: private TOKEN = secret
+program: main.o
+
+program:
+	@echo program has $(TOKEN)
+
+main.o:
+	@echo object has $(TOKEN)
+</code></pre>
+<p>The target itself can see <code>TOKEN</code>:</p>
+<pre><code class="language-text">program has secret
+</code></pre>
+<p>But its prerequisite cannot:</p>
+<pre><code class="language-text">object has
+</code></pre>
+<p>The parser records this modifier in <code>read.c</code>:</p>
+<pre><code class="language-c">if (vmod.private_v)
+  v-&gt;private_var = 1;
+</code></pre>
+<p>During lookup, Make tracks whether it has crossed a parent boundary:</p>
+<pre><code class="language-c">int is_parent = 0;
+</code></pre>
+<p>After each scope transition, it updates that state:</p>
+<pre><code class="language-c">is_parent |= setlist-&gt;next_is_parent;
+</code></pre>
+<p>Once lookup is searching a parent’s variables, private definitions are hidden:</p>
+<pre><code class="language-c">if (v &amp;&amp; (!is_parent || !v-&gt;private_var))
+  return v;
+</code></pre>
+<p>The wording in the condition can feel backward at first. Read it this way:</p>
+<ul>
+<li>if this is not a parent layer, a private variable is visible;</li>
+<li>if this is a parent layer, skip private variables.</li>
+</ul>
+<p>A <code>private</code> target-specific variable is like a note marked “for this target only.” The target may read it, but it is not handed down the prerequisite chain.</p>
+<h2>Pattern-specific variables form a middle layer</h2>
+<p>A pattern-specific variable looks like this:</p>
+<pre><code class="language-make">%.o: CFLAGS = -Wall
+debug.o: CFLAGS = -g
+</code></pre>
+<p>The first assignment applies to matching targets; the second is specific to one target.</p>
+<p>Pattern-specific definitions are not stored directly in every possible file. That would be impossible: Makefiles can describe targets that do not exist yet.</p>
+<p>Instead, Make stores pattern rules in a global linked list of <code>struct pattern_var</code> objects:</p>
+<pre><code class="language-c">static struct pattern_var *pattern_vars = NULL;
+</code></pre>
+<p>Each entry remembers a target pattern and its variable definition:</p>
+<pre><code class="language-c">struct pattern_var
+  {
+    struct pattern_var *next;
+    const char *suffix;
+    const char *target;
+    size_t len;
+    struct variable variable;
+  };
+</code></pre>
+<p>For:</p>
+<pre><code class="language-make">%.o: CFLAGS = -Wall
+</code></pre>
+<p>the pattern entry stores something conceptually like:</p>
+<pre><code class="language-text">target pattern: %.o
+variable name:  CFLAGS
+variable value: -Wall
+</code></pre>
+<p>Later, when Make needs variables for <code>debug.o</code>, it searches the pattern list and gathers all matching definitions into a real variable set attached to that file.</p>
+<h2>Why pattern variables are found later</h2>
+<p>While Make is still reading Makefiles, more pattern-specific assignments may appear later in the input.</p>
+<p>So <code>initialize_file_variables()</code> deliberately postpones pattern matching when <code>reading</code> is true:</p>
+<pre><code class="language-c">if (!reading &amp;&amp; !file-&gt;pat_searched)
+  {
+    /* Search matching pattern variables. */
+  }
+</code></pre>
+<p>This timing matters.</p>
+<p>Imagine:</p>
+<pre><code class="language-make">app: main.o
+
+%.o: CFLAGS = -Wall
+</code></pre>
+<p>When Make first reads <code>app: main.o</code>, it creates a file record for <code>main.o</code>. But it should not permanently conclude that <code>main.o</code> has no pattern-specific variables, because <code>%.o: CFLAGS = -Wall</code> has not been parsed yet.</p>
+<p>Later, during the build, Make initializes <code>main.o</code> with <code>reading == 0</code>. Only then does it search the complete pattern-variable collection.</p>
+<p>This is like waiting until all transparent stencils have been placed on a table before deciding which ones cover a particular drawing.</p>
+<h2>Pattern matching and ordering</h2>
+<p>Pattern-specific variables may overlap:</p>
+<pre><code class="language-make">%.o: CFLAGS = generic
+src/%.o: CFLAGS = source
+src/main.o: CFLAGS = exact
+</code></pre>
+<p>GNU Make needs a deterministic ordering for patterns. <code>create_pattern_var()</code> stores them ordered by pattern length:</p>
+<pre><code class="language-c">if (*v == 0 || (*v)-&gt;len &gt; len)
+  {
+    p-&gt;next = *v;
+    *v = p;
+    break;
+  }
+</code></pre>
+<p>The list is arranged with shorter patterns first. The lookup function then proceeds through matching patterns in list order:</p>
+<pre><code class="language-c">p = lookup_pattern_var (0, file-&gt;name, targlen);
+</code></pre>
+<p>Matching pattern definitions are inserted into a temporary target pattern scope. Definitions encountered later in that scope can replace equal-origin definitions encountered earlier, so more-specific matching patterns receive the intended priority.</p>
+<p>For a target such as <code>src/main.o</code>, the final visible order is conceptually:</p>
+<pre><code class="language-text">explicit target-specific variables
+matching pattern-specific variables
+parent target-specific variables
+global variables
+</code></pre>
+<p>An explicit target-specific assignment therefore sits above pattern-specific values:</p>
+<pre><code class="language-make">%.o: CFLAGS = -Wall
+main.o: CFLAGS = -g
+</code></pre>
+<p><code>main.o</code> sees <code>-g</code>.</p>
+<h2>Attaching the pattern layer</h2>
+<p>Once matching pattern variables have been gathered, Make inserts their variable set between the target’s own layer and its inherited layer:</p>
+<pre><code class="language-c">file-&gt;pat_variables-&gt;next = l-&gt;next;
+file-&gt;pat_variables-&gt;next_is_parent = l-&gt;next_is_parent;
+l-&gt;next = file-&gt;pat_variables;
+l-&gt;next_is_parent = 0;
+</code></pre>
+<p>Before insertion:</p>
+<pre><code class="language-text">target layer → parent or global layer
+</code></pre>
+<p>After insertion:</p>
+<pre><code class="language-text">target layer → pattern layer → parent or global layer
+</code></pre>
+<p>The target’s own definitions still win. Pattern definitions are visible only when the target layer does not provide the requested name.</p>
+<p>The assignment <code>l-&gt;next_is_parent = 0</code> is also important. The pattern layer is not a parent target. It is simply another local overlay belonging to this target’s lookup context.</p>
+<h2>Temporary scopes for functions</h2>
+<p>Not every scope belongs to a target. Some exist only while Make evaluates a function.</p>
+<p>Take <code>foreach</code>:</p>
+<pre><code class="language-make">WORDS = red green blue
+RESULT = $(foreach color,$(WORDS),item-$(color))
+</code></pre>
+<p>During each iteration, <code>color</code> must temporarily have a different value. It must hide any global variable named <code>color</code>, but disappear when the function returns.</p>
+<p>In <code>function.c</code>, <code>func_foreach()</code> pushes a new scope:</p>
+<pre><code class="language-c">push_new_variable_scope ();
+var = define_variable (vp, strlen (vp), &quot;&quot;, o_automatic, 0);
+</code></pre>
+<p>Then each loop iteration updates that temporary variable:</p>
+<pre><code class="language-c">free (var-&gt;value);
+var-&gt;value = xstrndup (p, len);
+
+result = allocated_variable_expand (body);
+</code></pre>
+<p>Finally, the scope is discarded:</p>
+<pre><code class="language-c">pop_variable_scope ();
+</code></pre>
+<p>The result becomes:</p>
+<pre><code class="language-text">item-red item-green item-blue
+</code></pre>
+<p>The global scope remains unchanged.</p>
+<p>This is much like putting a sticky note over a word in a book while reading one paragraph. The note changes what you see locally, then comes off without altering the printed page beneath it.</p>
+<p>The <code>let</code> function uses the same strategy for several temporary bindings:</p>
+<pre><code class="language-make">PAIR = Ada Lovelace
+TEXT = $(let first last,$(PAIR),$(last), $(first))
+</code></pre>
+<p>Both <code>foreach</code> and <code>let</code> rely on variable-set-list push and pop operations rather than inventing their own variable systems.</p>
+<h2>Pushing a scope</h2>
+<p><code>create_new_variable_set()</code> allocates a new set and places it above the current list:</p>
+<pre><code class="language-c">setlist-&gt;set = set;
+setlist-&gt;next = current_variable_set_list;
+setlist-&gt;next_is_parent = 0;
+</code></pre>
+<p>It returns the new node, but does not itself change the global current pointer.</p>
+<p><code>push_new_variable_scope()</code> does that:</p>
+<pre><code class="language-c">current_variable_set_list = create_new_variable_set ();
+</code></pre>
+<p>In the ordinary case, this creates the expected shape:</p>
+<pre><code class="language-text">new temporary scope → old current scope → lower scopes
+</code></pre>
+<p>For example, inside <code>$(call ...)</code>, Make creates bindings such as <code>$(0)</code>, <code>$(1)</code>, and <code>$(2)</code> in a temporary scope. The implementation pushes a scope before defining those automatic variables:</p>
+<pre><code class="language-c">push_new_variable_scope ();
+
+for (i = 0; *argv; ++i, ++argv)
+  define_variable (num, strlen (num), *argv, o_automatic, 0);
+</code></pre>
+<p>That is why a macro can safely use <code>$(1)</code> without colliding with some unrelated global variable named <code>1</code>.</p>
+<p>Function-local scopes are not an abstract language feature layered on top of Make. They use the same concrete scope-chain machinery as target-specific variables.</p>
+<h2>The unusual global-scope adjustment</h2>
+<p><code>push_new_variable_scope()</code> contains a surprising special case:</p>
+<pre><code class="language-c">if (current_variable_set_list-&gt;next == &amp;global_setlist)
+  {
+    /* Rearrange the global scope chain. */
+  }
+</code></pre>
+<p>Why is this necessary?</p>
+<p>File-specific variable lists point directly at <code>global_setlist</code>. If Make simply changed <code>current_variable_set_list</code> to a new node above the global node, existing target lists would not see that temporary global-adjacent scope.</p>
+<p>So when the current context is global, Make rearranges the list to preserve the identity of <code>global_setlist</code> while inserting a new scope beneath it.</p>
+<p>The comment explains the intended transformation:</p>
+<pre><code class="language-text">new → global
+</code></pre>
+<p>becomes effectively:</p>
+<pre><code class="language-text">global → new
+</code></pre>
+<p>while the current pointer remains the stable global list node.</p>
+<p>This is an implementation detail, but it reveals an important design constraint: many targets share the same global tail. Make must preserve that shared anchor while temporarily adding layers around it.</p>
+<p>It is like renovating the lobby of a building without changing every tenant’s recorded address.</p>
+<h2>Popping a scope restores the old view</h2>
+<p>After a function finishes, <code>pop_variable_scope()</code> removes the top scope.</p>
+<p>The normal case is direct:</p>
+<pre><code class="language-c">setlist = current_variable_set_list;
+set = setlist-&gt;set;
+current_variable_set_list = setlist-&gt;next;
+</code></pre>
+<p>Then Make frees the removed list node, its variable table, and the variable names and values stored in it.</p>
+<p>The function-scope lifetime is therefore strict:</p>
+<pre><code class="language-text">push scope
+define temporary variables
+expand body
+pop scope
+forget temporary variables
+</code></pre>
+<p>That rule is why these bindings behave predictably even when functions nest:</p>
+<pre><code class="language-make">$(foreach x,a b,$(foreach x,1 2,$(x)))
+</code></pre>
+<p>The inner <code>x</code> hides the outer <code>x</code> only while the inner <code>foreach</code> runs. Once it ends, the outer <code>x</code> becomes visible again.</p>
+<h2>Variable expansion uses the current chain</h2>
+<p>The lookup chain matters only if expansion consults it. That connection appears in <code>expand.c</code>.</p>
+<p>When Make expands a reference such as <code>$(CFLAGS)</code>, it calls:</p>
+<pre><code class="language-c">v = lookup_variable (name, length);
+</code></pre>
+<p>If a definition is found, Make chooses whether to use the stored value directly or recursively expand it:</p>
+<pre><code class="language-c">value = (v-&gt;recursive ? recursively_expand (v) : v-&gt;value);
+</code></pre>
+<p>The parsing details and recursive-expansion behavior belong to <a href="03_variable_expand.html">variable_expand</a>. For now, the key point is simpler:</p>
+<blockquote>
+<p>Expansion does not have its own separate scope algorithm. It uses <code>lookup_variable()</code>, which walks <code>current_variable_set_list</code>.</p>
+</blockquote>
+<p>So if Make changes the current list, it changes what every ordinary variable reference can see.</p>
+<h2>Expanding specifically for one target</h2>
+<p>Recipe expansion must use the target’s scope chain, not whatever scope happened to be current elsewhere in the program.</p>
+<p><code>variable_expand_for_file()</code> does exactly that:</p>
+<pre><code class="language-c">savev = current_variable_set_list;
+current_variable_set_list = file-&gt;variables;
+
+result = variable_expand (line);
+
+current_variable_set_list = savev;
+</code></pre>
+<p>This is a controlled context switch:</p>
+<ol>
+<li>save the old variable view;</li>
+<li>install the target’s variable-set list;</li>
+<li>expand the recipe text;</li>
+<li>restore the old view.</li>
+</ol>
+<p>Suppose the Makefile says:</p>
+<pre><code class="language-make">CFLAGS = -O2
+debug: CFLAGS = -O0 -g
+
+debug:
+	@echo $(CFLAGS)
+</code></pre>
+<p>When Make expands the <code>debug</code> recipe, <code>current_variable_set_list</code> points at <code>debug-&gt;variables</code>, so lookup finds the target-specific definition before the global one.</p>
+<p>That is the mechanism behind target-aware recipe text.</p>
+<h2>Automatic variables join the target’s top scope</h2>
+<p>Automatic variables are another reason every target needs a local variable set.</p>
+<p>Before Make runs a recipe, <code>execute_file_commands()</code> prepares the target context:</p>
+<pre><code class="language-c">initialize_file_variables (file, 0);
+set_file_variables (file, file-&gt;stem);
+</code></pre>
+<p><code>set_file_variables()</code> defines values including <code>$@</code>, <code>$&lt;</code>, <code>$^</code>, and <code>$*</code> in the file’s top variable set.</p>
+<p>For example:</p>
+<pre><code class="language-make">app: main.o util.o
+	$(CC) -o $@ $^
+</code></pre>
+<p>Make creates target-local definitions conceptually like:</p>
+<pre><code class="language-text">@: app
+&lt;: main.o
+^: main.o util.o
+*: app or an implicit-rule stem
+</code></pre>
+<p>Those definitions are installed with <code>define_variable_for_file()</code>:</p>
+<pre><code class="language-c">#define DEFINE_VARIABLE(name, len, value) \
+  (void) define_variable_for_file (name,len,value,o_automatic,0,file)
+</code></pre>
+<p>This means automatic variables sit at the very top of the target’s local scope. They are visible while Make expands that target’s recipe, but they do not rewrite global variables or leak into another target’s recipe.</p>
+<p>The connection is:</p>
+<pre><code class="language-text">file record
+    owns a variable set list
+        whose top set receives automatic variables
+            which recipe expansion can read
+</code></pre>
+<p>The full life of automatic variables is introduced in <a href="01_struct_variable.html">struct variable</a>, and recipe execution returns in <a href="09_new_job.html">new_job</a>.</p>
+<h2>Appending across target scopes</h2>
+<p>Target-specific <code>+=</code> has behavior that would be difficult to implement with only “first match wins.”</p>
+<p>Consider:</p>
+<pre><code class="language-make">CFLAGS = -O2
+
+app: CFLAGS += -DAPP
+app: main.o
+</code></pre>
+<p>The expected value for <code>app</code> is:</p>
+<pre><code class="language-text">-O2 -DAPP
+</code></pre>
+<p>The target-specific assignment is not a complete replacement. It is an instruction to append to a lower visible value.</p>
+<p>GNU Make records that fact in the variable’s <code>append</code> bit. During recursive expansion, <code>allocated_variable_append()</code> walks the set chain and reconstructs the full result.</p>
+<p>The recursive helper starts by checking the current scope:</p>
+<pre><code class="language-c">v = lookup_variable_in_set (name, length, set-&gt;set);
+</code></pre>
+<p>If it finds an appending definition, it first obtains lower contributions:</p>
+<pre><code class="language-c">if (v-&gt;append)
+  buf = variable_append (name, length, set-&gt;next, nextlocal);
+</code></pre>
+<p>Then it adds the current scope’s value.</p>
+<p>The resulting conceptual walk is:</p>
+<pre><code class="language-text">global CFLAGS        -O2
+app appended CFLAGS  -DAPP
+combined result      -O2 -DAPP
+</code></pre>
+<p>This is an exception to the usual “first definition stops lookup” picture, but only because <code>+=</code> explicitly means “combine with an inherited value.”</p>
+<p>A normal target-specific assignment cuts off lower values:</p>
+<pre><code class="language-make">app: CFLAGS = -DAPP
+</code></pre>
+<p>An appending assignment intentionally preserves them:</p>
+<pre><code class="language-make">app: CFLAGS += -DAPP
+</code></pre>
+<h2>Command-line assignments still matter</h2>
+<p>A command-line variable assignment is powerful:</p>
+<pre><code class="language-sh">make CFLAGS=-fsanitize=address app
+</code></pre>
+<p>A plain target-specific assignment should not silently defeat that user request:</p>
+<pre><code class="language-make">app: CFLAGS = -O0
+</code></pre>
+<p>While reading a target-specific definition, <code>record_target_var()</code> checks for a global command-line or environment-override definition:</p>
+<pre><code class="language-c">gv = lookup_variable (v-&gt;name, len);
+
+if (gv &amp;&amp; v != gv
+    &amp;&amp; (gv-&gt;origin == o_env_override || gv-&gt;origin == o_command))
+</code></pre>
+<p>If it finds one, it replaces the target-local value with that stronger global assignment:</p>
+<pre><code class="language-c">v-&gt;value = xstrdup (gv-&gt;value);
+v-&gt;origin = gv-&gt;origin;
+v-&gt;recursive = gv-&gt;recursive;
+v-&gt;append = 0;
+</code></pre>
+<p>So the target gets its own local record, but that record reflects the command-line value.</p>
+<p>This preserves the user-facing rule that command-line variables normally override ordinary Makefile definitions—even target-specific ones.</p>
+<p>To force a target-specific assignment to win, the Makefile author can use <code>override</code>:</p>
+<pre><code class="language-make">app: override CFLAGS = -O0
+</code></pre>
+<p>That causes the parser to assign <code>o_override</code> origin. Then <code>record_target_var()</code> skips the command-line replacement logic.</p>
+<p>Again, scope and origin cooperate:</p>
+<ul>
+<li>the scope chain decides which target-local record is visible;</li>
+<li>origin determines whether a stronger command-line definition replaces the contents of that record.</li>
+</ul>
+<h2>Looking up a variable for a chosen file</h2>
+<p>Sometimes Make needs to inspect a variable for one target without permanently changing global state.</p>
+<p><code>lookup_variable_for_file()</code> provides that small transaction:</p>
+<pre><code class="language-c">savev = current_variable_set_list;
+current_variable_set_list = file-&gt;variables;
+
+var = lookup_variable (name, length);
+
+current_variable_set_list = savev;
+</code></pre>
+<p>For example, command execution uses this when examining <code>.SHELLFLAGS</code> for a specific target. A target-specific <code>.SHELLFLAGS</code> assignment should affect that target’s recipe shell without affecting every other target.</p>
+<p>This helper is a reminder that <code>current_variable_set_list</code> is global mutable state. The code must save and restore it carefully, much like temporarily changing the current working directory.</p>
+<h2>One build, many variable views</h2>
+<p>Here is the overall flow when Make prepares a target recipe.</p>
+<pre class="mermaid">sequenceDiagram
+    participant Engine
+    participant File
+    participant Scopes
+    participant Expand
+    participant Shell
+    Engine->>File: Prepare target for execution
+    File->>Scopes: Initialize target variable chain
+    File->>Scopes: Install automatic variable values
+    Engine->>Expand: Expand target recipe text
+    Expand->>Scopes: Find each visible variable
+    Expand->>Shell: Send expanded recipe and environment
+</pre>
+<p>The important detail is that the <code>Scopes</code> participant is not a single universal dictionary. It is a chain selected for the target currently being processed.</p>
+<p>That is why Make can expand the same recipe template differently for different targets.</p>
+<h2>Reading the code without getting lost</h2>
+<p>When exploring GNU Make’s variable scoping code, keep these landmarks in mind:</p>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Main location</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What is one variable definition?</td>
+<td><code>struct variable</code> in <code>src/variable.h</code></td>
+</tr>
+<tr>
+<td>What is one scope dictionary?</td>
+<td><code>struct variable_set</code> in <code>src/variable.h</code></td>
+</tr>
+<tr>
+<td>How are scopes linked?</td>
+<td><code>struct variable_set_list</code> in <code>src/variable.h</code></td>
+</tr>
+<tr>
+<td>Where does ordinary lookup happen?</td>
+<td><code>lookup_variable()</code> in <code>src/variable.c</code></td>
+</tr>
+<tr>
+<td>How does a target receive a scope?</td>
+<td><code>initialize_file_variables()</code> in <code>src/variable.c</code></td>
+</tr>
+<tr>
+<td>Where are target-specific assignments parsed?</td>
+<td><code>record_target_var()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>Where do function-local scopes appear?</td>
+<td><code>foreach</code>, <code>let</code>, and <code>call</code> in <code>src/function.c</code></td>
+</tr>
+<tr>
+<td>Where are automatic variables installed?</td>
+<td><code>set_file_variables()</code> in <code>src/commands.c</code></td>
+</tr>
+<tr>
+<td>How does recipe expansion use a target’s scopes?</td>
+<td><code>variable_expand_for_file()</code> in <code>src/expand.c</code></td>
+</tr>
+</tbody>
+</table>
+<p>A useful debugging question is:</p>
+<blockquote>
+<p>What does <code>current_variable_set_list</code> point to right now?</p>
+</blockquote>
+<p>Once you know that, variable lookup becomes much less mysterious.</p>
+<h2>A practical scope experiment</h2>
+<p>This Makefile demonstrates global, pattern-specific, target-specific, inherited, and private values:</p>
+<pre><code class="language-make">LEVEL = global
+
+%.o: LEVEL = pattern
+app: LEVEL = target
+app: main.o util.o
+</code></pre>
+<pre><code class="language-make">app:
+	@echo app sees $(LEVEL)
+
+main.o:
+	@echo main sees $(LEVEL)
+
+util.o:
+	@echo util sees $(LEVEL)
+</code></pre>
+<p>The expected result is:</p>
+<pre><code class="language-text">main sees pattern
+util sees pattern
+app sees target
+</code></pre>
+<p>Why do the object files see <code>pattern</code> rather than <code>target</code> here? Their own matching pattern-specific layer sits above the parent target layer.</p>
+<p>Now remove the pattern-specific assignment:</p>
+<pre><code class="language-make"># %.o: LEVEL = pattern
+</code></pre>
+<p>Then the prerequisites inherit from <code>app</code>:</p>
+<pre><code class="language-text">main sees target
+util sees target
+app sees target
+</code></pre>
+<p>Finally, make the target variable private:</p>
+<pre><code class="language-make">app: private LEVEL = target
+</code></pre>
+<p>Now the prerequisite lookup crosses into a parent layer and skips the private definition:</p>
+<pre><code class="language-text">main sees global
+util sees global
+app sees target
+</code></pre>
+<p>That one experiment captures the transparent-overlay model:</p>
+<pre><code class="language-text">own target layer
+pattern layer
+parent layer unless private
+global layer
+</code></pre>
+<h2>Key takeaways</h2>
+<p>A <code>variable_set_list</code> is GNU Make’s scoped-variable search path.</p>
+<p>It combines several kinds of variable contexts:</p>
+<ul>
+<li>a shared global variable set;</li>
+<li>a target’s own target-specific definitions;</li>
+<li>matching pattern-specific definitions;</li>
+<li>inherited definitions from the target that requested a prerequisite;</li>
+<li>temporary function scopes for <code>foreach</code>, <code>let</code>, and <code>call</code>;</li>
+<li>automatic variables created while preparing a recipe.</li>
+</ul>
+<p>The essential lookup rule is simple:</p>
+<ol>
+<li>start at <code>current_variable_set_list</code>;</li>
+<li>search the current set’s hash table;</li>
+<li>return the first visible matching variable;</li>
+<li>continue downward only when that scope has no usable definition.</li>
+</ol>
+<p>The <code>next_is_parent</code> marker adds one important refinement: a <code>private</code> variable remains visible to its own target but is hidden after lookup crosses into a parent target’s scope.</p>
+<p>Finally, this chain is the foundation for expansion. When Make sees <code>$(CFLAGS)</code>, it does not merely retrieve text from one global map. It searches the variable overlays appropriate to the target, function, or evaluation context currently active.</p>
+<p>Now that we know where Make finds a variable definition, the next question is what Make does with the definition’s text—especially recursive values containing more variable references and function calls. That is the subject of <a href="03_variable_expand.html">variable_expand</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="01_struct_variable.html">&larr; struct variable</a></span>
+    <span><a href="03_variable_expand.html">variable_expand &rarr;</a></span>
+  </nav>
+</body>
+</html>

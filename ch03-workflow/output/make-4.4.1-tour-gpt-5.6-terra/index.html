@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>make-4.4.1 tour</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <h1>make-4.4.1</h1>
+  <p class="muted">Lens: <span class="lens">beginner-tutorial</span> &middot; 10 chapters &middot; 20 files analyzed</p>
+  <p>GNU Make is a build automation tool that reads makefiles, represents targets and prerequisites as an in-memory graph, and rebuilds only the files that need updating. It also expands variables and functions, discovers implicit build rules, runs recipes through shells, and coordinates parallel work across recursive make processes.</p>
+
+  <h2>Architecture map</h2>
+  <pre class="mermaid">
+flowchart TD
+    A0["struct variable"]
+    A1["variable_set_list"]
+    A2["variable_expand"]
+    A3["eval"]
+    A4["struct file"]
+    A5["struct dep"]
+    A6["struct rule"]
+    A7["update_goal_chain"]
+    A8["new_job"]
+    A9["jobserver"]
+    A0 -- "is stored and resolved within" --> A1
+    A1 -- "provides target-specific scope" --> A4
+    A2 -- "expands references to" --> A0
+    A2 -- "looks up variables through" --> A1
+    A3 -- "parses and defines" --> A0
+    A3 -- "creates and records targets" --> A4
+    A3 -- "parses and attaches prerequisi" --> A5
+    A3 -- "creates implicit pattern rules" --> A6
+    A3 -- "uses to expand makefile text" --> A2
+    A4 -- "owns dependency edges" --> A5
+    A4 -- "holds target-specific variable" --> A1
+    A6 -- "describes prerequisite pattern" --> A5
+    A6 -- "supplies recipes and dependenc" --> A4
+    A7 -- "evaluates whether to rebuild" --> A4
+    A7 -- "traverses dependency edges" --> A5
+    A7 -- "uses to infer missing build re" --> A6
+    A7 -- "starts when a target must be r" --> A8
+    A8 -- "executes the target's recipe" --> A4
+    A8 -- "expands recipe command lines" --> A2
+    A8 -- "uses to construct the target e" --> A1
+    A8 -- "acquires and releases parallel" --> A9
+    A9 -- "limits concurrent job launches" --> A8
+  </pre>
+
+  <h2>Read in order</h2>
+  <ol>
+    <li><a href="01_struct_variable.html">struct variable</a></li>
+    <li><a href="02_variable_set_list.html">variable_set_list</a></li>
+    <li><a href="03_variable_expand.html">variable_expand</a></li>
+    <li><a href="04_eval.html">eval</a></li>
+    <li><a href="05_struct_file.html">struct file</a></li>
+    <li><a href="06_struct_dep.html">struct dep</a></li>
+    <li><a href="07_struct_rule.html">struct rule</a></li>
+    <li><a href="08_update_goal_chain.html">update_goal_chain</a></li>
+    <li><a href="09_new_job.html">new_job</a></li>
+    <li><a href="10_jobserver.html">jobserver</a></li>
+  </ol>
+
+  <h2>Files the LLM picked</h2>
+<p>This is GNU Make: a C command-line build engine that parses makefiles into a target/dependency graph, expands variables and built-in functions, resolves explicit and implicit rules, and executes recipes with parallel-job coordination. Its central subsystems are makefile parsing, variable/function evaluation, file/dependency/rule data models, timestamp-driven remake traversal, implicit-rule search, filesystem/VPATH lookup, and process/jobserver management. I selected the executable entry point, the concrete implementations of each core phase, and the headers defining the graph and execution-state models, while excluding portability copies, platform-specific variants, and generic utility plumbing.</p>
+
+  <ul class="files">
+    <li><code>src/main.c</code></li>
+    <li><code>src/read.c</code></li>
+    <li><code>src/variable.c</code></li>
+    <li><code>src/variable.h</code></li>
+    <li><code>src/expand.c</code></li>
+    <li><code>src/function.c</code></li>
+    <li><code>src/filedef.h</code></li>
+    <li><code>src/dep.h</code></li>
+    <li><code>src/rule.c</code></li>
+    <li><code>src/rule.h</code></li>
+    <li><code>src/file.c</code></li>
+    <li><code>src/remake.c</code></li>
+    <li><code>src/implicit.c</code></li>
+    <li><code>src/commands.c</code></li>
+    <li><code>src/job.c</code></li>
+    <li><code>src/job.h</code></li>
+    <li><code>src/posixos.c</code></li>
+    <li><code>src/default.c</code></li>
+    <li><code>src/vpath.c</code></li>
+    <li><code>src/dir.c</code></li>
+  </ul>
+</body>
+</html>

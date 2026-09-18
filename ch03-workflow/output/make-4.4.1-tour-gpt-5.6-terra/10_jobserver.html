@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>jobserver — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 10: jobserver</h1>
+<p>You run:</p>
+<pre><code class="language-sh">make -j8
+</code></pre>
+<p>Then one recipe starts a recursive build:</p>
+<pre><code class="language-make">all:
+	$(MAKE) -C library
+</code></pre>
+<p>The submake starts more recipes. Perhaps it starts another submake. How does GNU Make prevent this from becoming:</p>
+<pre><code class="language-text">top make starts eight jobs
+submake starts eight more
+nested submake starts eight more
+</code></pre>
+<p>A local <code>-j8</code> counter inside each Make process would not be enough. Each process could independently believe that it owns eight worker slots.</p>
+<p>GNU Make solves this with a shared pool of tokens called the <strong>jobserver</strong>.</p>
+<p>Think of the jobserver as a shared bucket of parking permits:</p>
+<ul>
+<li>a permit allows one additional job to start;</li>
+<li>the top-level Make creates a limited number of permits;</li>
+<li>recursive Make processes use the same bucket;</li>
+<li>when a job ends, its permit goes back;</li>
+<li>no matter how many Make managers exist, the total number of active jobs stays bounded.</li>
+</ul>
+<p>The jobserver is the missing coordination layer after <a href="09_new_job.html">new_job</a>: <code>new_job()</code> knows how to launch one recipe, but the jobserver decides whether the wider recursive build has capacity for it.</p>
+<h2>Why one Make process always gets one free job</h2>
+<p>The jobserver does not put one token into its pool for every requested job.</p>
+<p>Suppose the user asks for:</p>
+<pre><code class="language-sh">make -j4
+</code></pre>
+<p>In <code>main.c</code>, the top-level Make creates a jobserver with:</p>
+<pre><code class="language-c">if (job_slots &gt; 1 &amp;&amp; jobserver_setup (job_slots - 1, jobserver_style))
+  {
+    master_job_slots = job_slots;
+    job_slots = 0;
+  }
+</code></pre>
+<p>The important subtraction is:</p>
+<pre><code class="language-text">requested parallelism: 4
+tokens placed in shared pool: 3
+free job held by each Make process: 1
+</code></pre>
+<p>Why only three tokens?</p>
+<p>Every Make process is allowed to start one job without first taking a token from the shared pool. The top-level Make therefore needs only three extra permits to reach four concurrent jobs.</p>
+<p>This avoids a nasty startup problem. Imagine a recursive Make that had to acquire a token before starting <em>any</em> work. If all tokens were temporarily held elsewhere, the recursive Make could be alive but unable to do its first useful action.</p>
+<p>Instead, each Make process begins with one built-in permit:</p>
+<pre><code class="language-text">one local free permit
+plus any permits acquired from the shared pool
+</code></pre>
+<p>The source comment in <code>main.c</code> states the rule directly:</p>
+<blockquote>
+<p>Every make assumes that it always has one job it can run.</p>
+</blockquote>
+<p>For a submake, that “free” permit corresponds to the permit already held by the parent while the recursive Make command runs.</p>
+<h2>The token pool is a pipe or FIFO</h2>
+<p>On POSIX systems, jobserver support lives in <code>src/posixos.c</code>.</p>
+<p>The simplest implementation uses a pipe:</p>
+<pre><code class="language-c">static int job_fds[2] = { -1, -1 };
+static char token = '+';
+</code></pre>
+<p>The two file descriptors are:</p>
+<table>
+<thead>
+<tr>
+<th>Descriptor</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_fds[0]</code></td>
+<td>Read one available token</td>
+</tr>
+<tr>
+<td><code>job_fds[1]</code></td>
+<td>Write one returned token</td>
+</tr>
+</tbody>
+</table>
+<p>The token itself is just a byte:</p>
+<pre><code class="language-c">static char token = '+';
+</code></pre>
+<p>Its character value is unimportant. A token could be <code>+</code>, <code>x</code>, or any other byte. What matters is that one byte represents one permit.</p>
+<p>During setup, Make fills the pipe:</p>
+<pre><code class="language-c">while (slots--)
+  {
+    EINTRLOOP (r, write (job_fds[1], &amp;token, 1));
+  }
+</code></pre>
+<p>For <code>make -j4</code>, <code>slots</code> is three. The pipe begins with:</p>
+<pre><code class="language-text">+ + +
+</code></pre>
+<p>Each successful read removes one permit. Each successful write returns one permit.</p>
+<p>Like a parking booth handing out numbered tags, the text printed on the tag does not matter. The limited number of tags is the policy.</p>
+<h2>FIFO jobservers use a named shared pipe</h2>
+<p>GNU Make can also use a named FIFO, depending on build configuration and jobserver style.</p>
+<p>The setup path creates a private FIFO in the temporary directory:</p>
+<pre><code class="language-c">sprintf (fifo_name, &quot;%s/GMfifo%lld&quot;, tmpdir, (long long) make_pid ());
+</code></pre>
+<p>Then Make opens it for reading and writing:</p>
+<pre><code class="language-c">job_fds[0] = open (fifo_name, O_RDONLY|O_NONBLOCK);
+job_fds[1] = open (fifo_name, O_WRONLY);
+</code></pre>
+<p>A FIFO has one useful difference from an anonymous pipe:</p>
+<ul>
+<li>a pipe client needs inherited file descriptors;</li>
+<li>a FIFO client can reopen the named FIFO from its pathname.</li>
+</ul>
+<p>The jobserver authorization string reflects that distinction.</p>
+<p>For a pipe, it looks conceptually like:</p>
+<pre><code class="language-text">readfd,writefd
+</code></pre>
+<p>For a FIFO, it looks like:</p>
+<pre><code class="language-text">fifo:path-to-named-pipe
+</code></pre>
+<p>The formatter is <code>jobserver_get_auth()</code>:</p>
+<pre><code class="language-c">if (js_type == js_fifo)
+  sprintf (auth, &quot;fifo:%s&quot;, fifo_name);
+else
+  sprintf (auth, &quot;%d,%d&quot;, job_fds[0], job_fds[1]);
+</code></pre>
+<p>Both forms describe the same thing: where a recursive Make should find the shared permit bucket.</p>
+<h2><code>MAKEFLAGS</code> carries the jobserver address</h2>
+<p>A recursive Make process needs to know that a jobserver exists and how to reach it.</p>
+<p>The top-level Make stores the authorization text in:</p>
+<pre><code class="language-c">jobserver_auth = jobserver_get_auth ();
+</code></pre>
+<p>Then <code>define_makeflags()</code> places it into <code>MAKEFLAGS</code>, which Make exports to child commands.</p>
+<p>A recursive Make therefore receives an environment conceptually like:</p>
+<pre><code class="language-text">MAKEFLAGS=... --jobserver-auth=3,4 -j
+</code></pre>
+<p>The exact descriptor numbers vary by process and platform. The important part is that <code>MAKEFLAGS</code> says:</p>
+<pre><code class="language-text">A shared jobserver exists.
+Here is its authorization data.
+</code></pre>
+<p>At startup, a submake sees <code>jobserver_auth</code> and attempts to join the existing group:</p>
+<pre><code class="language-c">if (jobserver_auth)
+  {
+    if (argv_slots == INVALID_JOB_SLOTS)
+      {
+        if (jobserver_parse_auth (jobserver_auth))
+          goto job_setup_complete;
+</code></pre>
+<p>If parsing succeeds, the submake does not create a new independent pool. It sets:</p>
+<pre><code class="language-c">job_slots = 0;
+</code></pre>
+<p>That value means:</p>
+<pre><code class="language-text">Do not use the old local slot counter.
+Use jobserver tokens instead.
+</code></pre>
+<p>This is the crucial recursive-build property:</p>
+<pre><code class="language-text">top make
+    ↓ shares authorization
+submake
+    ↓ joins same token pool
+nested submake
+    ↓ joins same token pool
+all makes
+    ↓ compete for the same limited permits
+</code></pre>
+<h2>A recursive Make must inherit the descriptors</h2>
+<p>Passing <code>--jobserver-auth=3,4</code> is not enough for a pipe-based jobserver.</p>
+<p>The submake must also inherit file descriptors <code>3</code> and <code>4</code>.</p>
+<p>Normally, GNU Make marks jobserver descriptors close-on-exec:</p>
+<pre><code class="language-c">fd_noinherit (job_fds[0]);
+fd_noinherit (job_fds[1]);
+</code></pre>
+<p>That is deliberate. Ordinary child commands do not need access to Make’s internal permit pool.</p>
+<p>Just before launching a recognized recursive Make command, GNU Make temporarily makes the descriptors inheritable:</p>
+<pre><code class="language-c">void
+jobserver_pre_child (int recursive)
+{
+  if (recursive &amp;&amp; js_type == js_pipe)
+    {
+      fd_inherit (job_fds[0]);
+      fd_inherit (job_fds[1]);
+    }
+}
+</code></pre>
+<p>After launching the child, it restores the normal close-on-exec protection:</p>
+<pre><code class="language-c">void
+jobserver_post_child (int recursive)
+{
+  if (recursive &amp;&amp; js_type == js_pipe)
+    {
+      fd_noinherit (job_fds[0]);
+      fd_noinherit (job_fds[1]);
+    }
+}
+</code></pre>
+<p>This is like temporarily giving a subcontractor a key to the shared parking garage, then taking the key back from the dispatch desk after they leave.</p>
+<p>The <code>recursive</code> argument comes from recipe classification in <a href="09_new_job.html">new_job</a>. GNU Make recognizes these forms as recursive:</p>
+<pre><code class="language-make">$(MAKE) -C library
+</code></pre>
+<pre><code class="language-make">+$(MAKE) -C library
+</code></pre>
+<p>The <code>+</code> prefix explicitly marks a recipe line as recursive. GNU Make also notices literal <code>$(MAKE)</code> or <code>${MAKE}</code> references while parsing recipe flags.</p>
+<h2>Why the <code>+</code> prefix matters</h2>
+<p>This recipe is correct:</p>
+<pre><code class="language-make">all:
+	$(MAKE) -C library
+</code></pre>
+<p>This is risky:</p>
+<pre><code class="language-make">all:
+	make -C library
+</code></pre>
+<p>The second line may invoke GNU Make, but the parent Make does not necessarily recognize the literal command <code>make</code> as a recursive Make invocation.</p>
+<p>That can lead to the familiar warning:</p>
+<pre><code class="language-text">warning: jobserver unavailable: using -j1. Add '+' to parent make rule.
+</code></pre>
+<p>The submake received jobserver authorization through <code>MAKEFLAGS</code>, but its expected pipe descriptors were closed during <code>exec()</code>.</p>
+<p>The safest forms are:</p>
+<pre><code class="language-make">all:
+	$(MAKE) -C library
+</code></pre>
+<p>or:</p>
+<pre><code class="language-make">all:
+	+$(MAKE) -C library
+</code></pre>
+<p>Use <code>+</code> when you want to make the recursive intent unmistakable, especially in generated recipes or unusual shell wrappers.</p>
+<p>The <code>+</code> prefix also affects modes such as <code>make -n</code>. A recursive Make command may still run because GNU Make needs it to propagate behavior correctly through the recursive build.</p>
+<h2>Acquiring a permit before a job starts</h2>
+<p>The main jobserver logic appears near the end of <code>new_job()</code> in <code>src/job.c</code>.</p>
+<p>Before starting a new recipe job, Make checks whether it can use its free permit:</p>
+<pre><code class="language-c">if (!jobserver_tokens)
+  break;
+</code></pre>
+<p>If <code>jobserver_tokens</code> is zero, this Make instance has no running jobs. It may start one job using its free permit.</p>
+<p>If it already has a job running, it must acquire another token:</p>
+<pre><code class="language-c">got_token = jobserver_acquire (waiting_jobs != NULL);
+
+if (got_token == 1)
+  break;
+</code></pre>
+<p>After Make has permission to proceed, it records that another job is active:</p>
+<pre><code class="language-c">++jobserver_tokens;
+</code></pre>
+<p>The local counter does not represent the total global pool. It records how many permits this Make process is currently using.</p>
+<p>For example, a single Make process might have:</p>
+<pre><code class="language-text">jobserver_tokens: 1
+meaning: one running job uses this Make process free permit
+</code></pre>
+<p>Then it starts another job:</p>
+<pre><code class="language-text">read one token from shared pool
+jobserver_tokens becomes 2
+</code></pre>
+<p>Then a third:</p>
+<pre><code class="language-text">read another token
+jobserver_tokens becomes 3
+</code></pre>
+<p>The global limit still holds because every permit beyond the first required a token read.</p>
+<h2>Releasing a permit after work finishes</h2>
+<p>When a child job completes, <code>reap_children()</code> eventually frees its <code>struct child</code> record.</p>
+<p><code>free_child()</code> handles the jobserver accounting:</p>
+<pre><code class="language-c">if (jobserver_enabled () &amp;&amp; jobserver_tokens &gt; 1)
+  {
+    jobserver_release (1);
+  }
+
+--jobserver_tokens;
+</code></pre>
+<p>The condition <code>jobserver_tokens &gt; 1</code> is the key.</p>
+<p>If this Make process had only one running job, that job used its free permit. No pipe token was consumed, so no token should be returned.</p>
+<p>If it had two or more running jobs, all jobs beyond the first consumed shared tokens. When one finishes, Make writes a token back:</p>
+<pre><code class="language-c">jobserver_release (1);
+</code></pre>
+<p>The write is simple:</p>
+<pre><code class="language-c">EINTRLOOP (r, write (job_fds[1], &amp;token, 1));
+</code></pre>
+<p>The lifecycle is:</p>
+<pre><code class="language-text">available token in pool
+    ↓
+Make reads token
+    ↓
+another recipe starts
+    ↓
+recipe finishes
+    ↓
+Make writes token back
+</code></pre>
+<p>A permit is not destroyed when work ends. It returns to the shared bucket for another Make process to use.</p>
+<h2>A recursive example</h2>
+<p>Consider this layout:</p>
+<pre><code class="language-make"># Top-level Makefile
+all:
+	$(MAKE) -C lib
+	$(MAKE) -C app
+</code></pre>
+<p>Suppose the user runs:</p>
+<pre><code class="language-sh">make -j3
+</code></pre>
+<p>The top-level Make creates:</p>
+<pre><code class="language-text">one local free permit
+two shared tokens
+</code></pre>
+<p>Now imagine it starts the <code>lib</code> submake.</p>
+<ol>
+<li>The top-level Make starts the recursive command.</li>
+<li>If it is the first active job, it uses its free permit.</li>
+<li>The <code>lib</code> submake starts.</li>
+<li>The <code>lib</code> Make process has one free permit of its own.</li>
+<li>The <code>lib</code> submake can start one recipe immediately.</li>
+<li>To start a second recipe, it must read one of the two shared tokens.</li>
+<li>To start a third recipe, it must read the final shared token.</li>
+<li>No further recipe can start until another job returns a token.</li>
+</ol>
+<p>The effective running work can look like:</p>
+<pre><code class="language-text">top-level recursive Make command
+lib recipe one
+lib recipe two
+</code></pre>
+<p>The parent’s recursive command is itself part of the accounting. Its held permit becomes the submake’s ability to run its first job.</p>
+<p>This is why the “one free job per Make process” rule does not multiply the global limit uncontrollably. A submake exists because its parent already holds a permit for the recursive invocation.</p>
+<pre class="mermaid">sequenceDiagram
+    participant Top as TopMake
+    participant Pool as PermitPool
+    participant Sub as SubMake
+    participant Job as RecipeJob
+    Top->>Pool: Take permit for additional work
+    Top->>Sub: Start recursive build
+    Sub->>Job: Start first local recipe
+    Sub->>Pool: Take permit for another recipe
+    Job->>Pool: Return permit after completion
+    Sub->>Top: Finish recursive build
+</pre>
+<h2>Waiting for tokens without missing finished children</h2>
+<p>Waiting for a token sounds simple:</p>
+<pre><code class="language-c">read (job_fds[0], &amp;intake, 1);
+</code></pre>
+<p>But GNU Make must also notice when one of its own child processes finishes.</p>
+<p>Imagine this timing:</p>
+<ol>
+<li>Make checks for completed children.</li>
+<li>No child appears complete yet.</li>
+<li>Make blocks waiting for a jobserver token.</li>
+<li>One local child exits and should return a token.</li>
+<li>Make must wake up, reap that child, and release its permit.</li>
+</ol>
+<p>GNU Make has two platform-dependent strategies.</p>
+<p>On systems with <code>pselect()</code>, <code>jobserver_acquire()</code> waits for either:</p>
+<ul>
+<li>the jobserver read descriptor to become readable; or</li>
+<li><code>SIGCHLD</code> to indicate a child exited.</li>
+</ul>
+<p>The important call is:</p>
+<pre><code class="language-c">r = pselect (job_fds[0]+1, &amp;readfds, NULL, NULL, specp, &amp;empty);
+</code></pre>
+<p>On systems without <code>pselect()</code>, Make uses a duplicate read descriptor:</p>
+<pre><code class="language-c">EINTRLOOP (job_rfd, dup (job_fds[0]));
+</code></pre>
+<p>The child-exit signal handler closes that duplicate:</p>
+<pre><code class="language-c">void
+jobserver_signal ()
+{
+  if (job_rfd &gt;= 0)
+    {
+      close (job_rfd);
+      job_rfd = -1;
+    }
+}
+</code></pre>
+<p>A blocked read on the duplicate then fails with <code>EBADF</code>, waking Make so it can reap children and retry.</p>
+<p>This is careful concurrency engineering. The jobserver cannot merely wait for a permit and ignore local child exits, because local completions may be exactly what makes new capacity available.</p>
+<p>It is like waiting at a ticket counter while also listening for a radio message that a worker has returned a badge.</p>
+<h2>Load limits can delay an already-authorized job</h2>
+<p>The jobserver limits total parallelism. The <code>-l</code> option adds another policy:</p>
+<pre><code class="language-sh">make -j8 -l2.0
+</code></pre>
+<p>This means:</p>
+<pre><code class="language-text">Never exceed the jobserver permit limit.
+Also avoid starting more local work when system load is high.
+</code></pre>
+<p>A job can have a permit available but still wait because <code>load_too_high()</code> says the machine is busy.</p>
+<p>Those delayed jobs live in:</p>
+<pre><code class="language-c">static struct child *waiting_jobs = 0;
+</code></pre>
+<p>Before blocking indefinitely for a jobserver token, Make calls:</p>
+<pre><code class="language-c">got_token = jobserver_acquire (waiting_jobs != NULL);
+</code></pre>
+<p>The argument requests a timeout when jobs are waiting for load conditions to improve.</p>
+<p>That timeout lets Make periodically return to:</p>
+<pre><code class="language-c">start_waiting_jobs ();
+</code></pre>
+<p>The result is a two-part policy:</p>
+<pre><code class="language-text">jobserver token: global permission exists
+load average: local machine should accept more work now
+</code></pre>
+<p>A parking permit lets a car enter the site, but a local traffic controller may still hold it at the gate until congestion clears.</p>
+<h2>Why ordinary commands should not receive jobserver access</h2>
+<p>A recipe may run arbitrary tools:</p>
+<pre><code class="language-make">app:
+	./code-generator
+	./test-runner
+	$(MAKE) -C plugins
+</code></pre>
+<p>Only the recursive Make command needs jobserver access.</p>
+<p>For non-recursive commands, <code>target_environment()</code> may invalidate pipe-based jobserver authorization in <code>MAKEFLAGS</code>:</p>
+<pre><code class="language-c">if (!recursive &amp;&amp; jobserver_auth)
+  invalid = jobserver_get_invalid_auth ();
+</code></pre>
+<p>For a pipe jobserver, the invalid authorization is:</p>
+<pre><code class="language-text">--jobserver-auth=-2,-2
+</code></pre>
+<p><code>jobserver_parse_auth()</code> recognizes that as invalid:</p>
+<pre><code class="language-c">if (rfd == -2 || wfd == -2)
+  return 0;
+</code></pre>
+<p>This prevents an arbitrary program that happens to launch <code>make</code> from accidentally believing it has valid jobserver access.</p>
+<p>There is one implementation detail worth knowing: <code>new_job()</code> builds one environment for a target’s whole recipe, and it may know that some line in the recipe is recursive. The source comment calls this a “slight inaccuracy.” Still, jobserver file descriptors remain close-on-exec for commands not classified as recursive, which is the decisive protection for pipe jobservers.</p>
+<p>The rule for Makefile authors remains simple:</p>
+<blockquote>
+<p>Invoke submakes with <code>$(MAKE)</code>, not a hard-coded <code>make</code>.</p>
+</blockquote>
+<h2>What happens when a submake forces its own <code>-j</code></h2>
+<p>Suppose a parent build uses a jobserver:</p>
+<pre><code class="language-sh">make -j8
+</code></pre>
+<p>but a child recipe runs:</p>
+<pre><code class="language-make">all:
+	$(MAKE) -j2 -C subdir
+</code></pre>
+<p>The explicit <code>-j2</code> says that the submake should not use the parent’s shared pool. GNU Make warns:</p>
+<pre><code class="language-text">warning: -j2 forced in submake: resetting jobserver mode.
+</code></pre>
+<p>The submake becomes the master of a new jobserver group.</p>
+<p>This can oversubscribe the machine because the parent and child no longer coordinate through one permit bucket.</p>
+<p>The same issue can occur if a Makefile changes <code>MAKEFLAGS</code> to set <code>-j</code> after joining a parent jobserver. <code>main.c</code> detects the conflict and resets jobserver mode.</p>
+<p>The practical recommendation is:</p>
+<pre><code class="language-make"># Good: inherit parent parallelism
+$(MAKE) -C subdir
+</code></pre>
+<pre><code class="language-make"># Usually avoid: creates independent parallel policy
+$(MAKE) -j2 -C subdir
+</code></pre>
+<p>A recursive build works best when the top-level invocation owns the concurrency decision.</p>
+<h2>Jobserver startup and shutdown checks</h2>
+<p>At the end of the build, GNU Make verifies that permits were returned.</p>
+<p><code>clean_jobserver()</code> checks whether the current Make process still claims tokens:</p>
+<pre><code class="language-c">if (jobserver_enabled() &amp;&amp; jobserver_tokens)
+  {
+    ON (error, NILF,
+        &quot;INTERNAL: Exiting with %u jobserver tokens&quot;, jobserver_tokens);
+  }
+</code></pre>
+<p>For the top-level controller, Make drains the shared pool:</p>
+<pre><code class="language-c">unsigned int tokens = 1 + jobserver_acquire_all ();
+</code></pre>
+<p>The extra <code>1</code> represents the root Make’s own free permit.</p>
+<p>Then it checks that the expected number returned:</p>
+<pre><code class="language-c">if (tokens != master_job_slots)
+  ONN (error, NILF,
+       &quot;INTERNAL: Exiting with %u jobserver tokens available&quot;, tokens);
+</code></pre>
+<p>This is an internal consistency check, like counting every parking permit at closing time.</p>
+<p>For a FIFO jobserver, the root Make also removes the named pipe during cleanup:</p>
+<pre><code class="language-c">if (job_root)
+  unlink (fifo_name);
+</code></pre>
+<p>Only the root owns this cleanup responsibility. Recursive clients must not delete the shared coordination object while the overall build still needs it.</p>
+<h2>Debugging jobserver behavior</h2>
+<p>Jobserver behavior is easiest to inspect with job debugging:</p>
+<pre><code class="language-sh">make -j4 --debug=j
+</code></pre>
+<p>You may see messages like:</p>
+<pre><code class="language-text">Using jobserver controller 3,4
+Need a job token; we have children
+Obtained token for child
+Released token for child
+</code></pre>
+<p>To inspect the propagated options, add a temporary target:</p>
+<pre><code class="language-make">show-flags:
+	@echo MAKEFLAGS is $$MAKEFLAGS
+	@echo MAKELEVEL is $$MAKELEVEL
+</code></pre>
+<p>Then run:</p>
+<pre><code class="language-sh">make -j4 show-flags
+</code></pre>
+<p>For recursive builds, use:</p>
+<pre><code class="language-make">all:
+	+$(MAKE) -C subdir show-flags
+</code></pre>
+<p>The submake should show a larger <code>MAKELEVEL</code> and jobserver-related content in <code>MAKEFLAGS</code>.</p>
+<p>If you see:</p>
+<pre><code class="language-text">warning: jobserver unavailable: using -j1. Add '+' to parent make rule.
+</code></pre>
+<p>check these first:</p>
+<ol>
+<li>Did the parent invoke the submake with <code>$(MAKE)</code>?</li>
+<li>Is the recipe line hidden behind a shell wrapper that Make cannot recognize?</li>
+<li>Did the submake force its own <code>-j</code> option?</li>
+<li>Did a non-Make tool launch the submake after jobserver descriptors were closed?</li>
+</ol>
+<h2>Reading the source without getting lost</h2>
+<p>These landmarks provide a useful map:</p>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Main location</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Where does the top-level Make create a jobserver?</td>
+<td><code>main()</code> in <code>src/main.c</code></td>
+</tr>
+<tr>
+<td>Where does a submake parse inherited authorization?</td>
+<td><code>jobserver_parse_auth()</code> in <code>src/posixos.c</code></td>
+</tr>
+<tr>
+<td>How is authorization formatted for <code>MAKEFLAGS</code>?</td>
+<td><code>jobserver_get_auth()</code> in <code>src/posixos.c</code></td>
+</tr>
+<tr>
+<td>Where are initial tokens written?</td>
+<td><code>jobserver_setup()</code> in <code>src/posixos.c</code></td>
+</tr>
+<tr>
+<td>Where does <code>new_job()</code> request a token?</td>
+<td><code>new_job()</code> in <code>src/job.c</code></td>
+</tr>
+<tr>
+<td>Where does Make read a permit?</td>
+<td><code>jobserver_acquire()</code> in <code>src/posixos.c</code></td>
+</tr>
+<tr>
+<td>Where does Make return a permit?</td>
+<td><code>jobserver_release()</code> in <code>src/posixos.c</code></td>
+</tr>
+<tr>
+<td>Where are recursive children given inheritable descriptors?</td>
+<td><code>jobserver_pre_child()</code> in <code>src/posixos.c</code></td>
+</tr>
+<tr>
+<td>Where are descriptors protected again?</td>
+<td><code>jobserver_post_child()</code> in <code>src/posixos.c</code></td>
+</tr>
+<tr>
+<td>Where does child completion return capacity?</td>
+<td><code>free_child()</code> in <code>src/job.c</code></td>
+</tr>
+<tr>
+<td>Where does Make validate permits at exit?</td>
+<td><code>clean_jobserver()</code> in <code>src/main.c</code></td>
+</tr>
+</tbody>
+</table>
+<p>The most useful orientation question is:</p>
+<blockquote>
+<p>Is Make deciding whether work is needed, starting a permitted job, or returning permission after the job ends?</p>
+</blockquote>
+<p>Those phases belong to different layers:</p>
+<pre><code class="language-text">update_goal_chain decides whether work is necessary
+new_job prepares and starts work
+jobserver coordinates global permission
+reap_children and free_child return capacity
+</code></pre>
+<h2>Key takeaways</h2>
+<p>The jobserver is GNU Make’s shared permit system for parallel recursive builds.</p>
+<p>Its central rules are:</p>
+<ul>
+<li><code>make -jN</code> creates one free permit plus <code>N - 1</code> shared tokens.</li>
+<li>A Make process may start its first job without reading a token.</li>
+<li>Each additional concurrent job requires one token from the shared pool.</li>
+<li>Finishing a token-backed job returns a token to the pool.</li>
+<li>Recursive Make commands inherit jobserver authorization through <code>MAKEFLAGS</code>.</li>
+<li>Pipe-based jobservers also require inherited file descriptors.</li>
+<li>GNU Make exposes those descriptors only to recognized recursive commands.</li>
+<li>Use <code>$(MAKE)</code>, and use <code>+</code> when explicit recursive treatment is needed.</li>
+<li>A submake that forces its own <code>-j</code> abandons parent coordination and creates a new concurrency group.</li>
+<li>Load limits can delay jobs even when permits are available.</li>
+<li>GNU Make checks token accounting during shutdown to catch internal leaks.</li>
+</ul>
+<p>The most important mental model is this:</p>
+<blockquote>
+<p>Parallelism is not owned by one Make process. It is a shared budget carried through the recursive build tree.</p>
+</blockquote>
+<p>That completes the tour from variable definitions through parsing, dependency graphs, implicit rules, update decisions, recipe execution, and finally shared parallel coordination. The next useful step is to read a real <code>make --debug=j -j</code> trace alongside these chapters and watch the permits move through an actual build.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="09_new_job.html">&larr; new_job</a></span>
+    <span>&nbsp;</span>
+  </nav>
+</body>
+</html>

@@ -1,0 +1,1036 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>struct dep — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 6: struct dep</h1>
+<p>Suppose a target needs a directory, a generated header, and two object files:</p>
+<pre><code class="language-make">app: main.o util.o generated/config.h | build
+	$(CC) -o $@ $^
+</code></pre>
+<p>All four names are prerequisites, but they do not mean exactly the same thing.</p>
+<ul>
+<li><code>main.o</code>, <code>util.o</code>, and <code>generated/config.h</code> can make <code>app</code> out of date.</li>
+<li><code>build</code> must exist before the recipe runs, but changing the directory should not force relinking.</li>
+<li>Some prerequisites may be written using variables that must wait for automatic variables such as <code>$@</code>.</li>
+<li>Some may sit after <code>.WAIT</code>, meaning Make must not start work on them until earlier work has finished.</li>
+</ul>
+<p>How does Make remember those distinctions?</p>
+<p>A <strong>struct dep</strong> is one edge in Make's dependency graph, connecting a target to a prerequisite. Besides the prerequisite file, it records details such as order-only status, whether it changed, deferred secondary expansion, and <code>.WAIT</code> barriers. Think of it as an arrow on a workflow diagram, annotated with rules about how strongly one task depends on another.</p>
+<p>The definition appears in <a href="https://github.com/mirror/make/blob/master/src/dep.h"><code>src/dep.h</code></a>. GNU Make uses a macro so the same core fields can describe both ordinary prerequisites and top-level goals:</p>
+<pre><code class="language-c">#define DEP(_t)                                 \
+    NAMESEQ (_t);                               \
+    struct file *file;                          \
+    _t *shuf;                                   \
+    const char *stem;                           \
+    unsigned int flags : 8;                     \
+</code></pre>
+<p>Then the rest of the metadata follows:</p>
+<pre><code class="language-c">    unsigned int changed : 1;                   \
+    unsigned int ignore_mtime : 1;              \
+    unsigned int staticpattern : 1;             \
+    unsigned int need_2nd_expansion : 1;        \
+    unsigned int ignore_automatic_vars : 1;     \
+</code></pre>
+<pre><code class="language-c">    unsigned int is_explicit : 1;               \
+    unsigned int wait_here : 1
+</code></pre>
+<p>The ordinary dependency record is simply:</p>
+<pre><code class="language-c">struct dep
+  {
+    DEP (struct dep);
+  };
+</code></pre>
+<p>That compact definition carries a great deal of build policy.</p>
+<h2>From a Makefile line to dependency arrows</h2>
+<p>The parser from <a href="04_eval.html">eval</a> reads a rule such as:</p>
+<pre><code class="language-make">app: main.o util.o | build
+</code></pre>
+<p>and eventually passes its prerequisite text to <code>split_prereqs()</code> in <code>src/file.c</code>.</p>
+<pre><code class="language-c">deps = split_prereqs (depstr);
+</code></pre>
+<p>The resulting chain is attached to the target’s <code>struct file</code>:</p>
+<pre><code class="language-text">app file record
+    ↓
+main.o dep → util.o dep → build dep
+</code></pre>
+<p>The target record itself was covered in <a href="05_struct_file.html">struct file</a>. The key distinction is:</p>
+<pre><code class="language-text">struct file  = a node in the graph
+struct dep   = one arrow leaving that node
+</code></pre>
+<p>For the example above, the graph is conceptually:</p>
+<pre><code class="language-text">app
+ ├── main.o
+ ├── util.o
+ ├── generated/config.h
+ └── build
+</code></pre>
+<p>But <code>struct dep</code> adds annotations that the plain diagram cannot show:</p>
+<pre><code class="language-text">app ── normal prerequisite ──&gt; main.o
+app ── normal prerequisite ──&gt; util.o
+app ── normal prerequisite ──&gt; generated/config.h
+app ── order-only prerequisite ──&gt; build
+</code></pre>
+<p>The arrows are not all equally strong.</p>
+<h2>A dependency begins as a name</h2>
+<p>The first fields come from <code>NAMESEQ</code>:</p>
+<pre><code class="language-c">#define NAMESEQ(_t)     \
+    _t *next;           \
+    const char *name
+</code></pre>
+<p>So every <code>struct dep</code> has:</p>
+<pre><code class="language-c">struct dep *next;
+const char *name;
+</code></pre>
+<p>The <code>next</code> pointer creates a linked list. A target with three prerequisites has three dependency records chained together.</p>
+<p>The <code>name</code> field is useful while Make still has only text. For example, while parsing:</p>
+<pre><code class="language-make">app: main.o util.o
+</code></pre>
+<p>Make may initially hold:</p>
+<pre><code class="language-text">name: main.o
+file: null
+</code></pre>
+<p>and then:</p>
+<pre><code class="language-text">name: util.o
+file: null
+</code></pre>
+<p>Later, Make resolves those names into <code>struct file</code> records.</p>
+<p>The helper macro <code>dep_name()</code> hides the transition:</p>
+<pre><code class="language-c">#define dep_name(d)       ((d)-&gt;name ? (d)-&gt;name : (d)-&gt;file-&gt;name)
+</code></pre>
+<p>Read it as:</p>
+<blockquote>
+<p>If this dependency still has a textual name, use it. Otherwise, use the name from its linked file record.</p>
+</blockquote>
+<p>That lets code work during both phases:</p>
+<table>
+<thead>
+<tr>
+<th>Phase</th>
+<th><code>name</code></th>
+<th><code>file</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Just parsed</td>
+<td>set</td>
+<td>often null</td>
+</tr>
+<tr>
+<td>Entered into file database</td>
+<td>null</td>
+<td>set</td>
+</tr>
+<tr>
+<td>Deferred second expansion</td>
+<td>set</td>
+<td>null until later</td>
+</tr>
+</tbody>
+</table>
+<p>It is like a shipping label that initially contains only a written address, then later points to a customer record in a logistics system.</p>
+<h2>Turning names into file records</h2>
+<p>For ordinary prerequisites, <code>enter_prereqs()</code> performs the conversion.</p>
+<pre><code class="language-c">d1-&gt;file = lookup_file (d1-&gt;name);
+if (d1-&gt;file == 0)
+  d1-&gt;file = enter_file (d1-&gt;name);
+
+d1-&gt;name = 0;
+</code></pre>
+<p>The steps are:</p>
+<ol>
+<li>Look for an existing <code>struct file</code> for the prerequisite name.</li>
+<li>Create one if Make has never seen the name before.</li>
+<li>Store the resulting file pointer in <code>d1-&gt;file</code>.</li>
+<li>Clear <code>d1-&gt;name</code>, because the file record now owns the canonical identity.</li>
+</ol>
+<p>For:</p>
+<pre><code class="language-make">app: main.o
+</code></pre>
+<p>the dependency changes from this:</p>
+<pre><code class="language-text">dep
+ ├── name: main.o
+ └── file: null
+</code></pre>
+<p>to this:</p>
+<pre><code class="language-text">dep
+ ├── name: null
+ └── file: pointer to the main.o file record
+</code></pre>
+<p>This connection matters because the update engine needs far more than a string. It needs to know whether <code>main.o</code> exists, has a recipe, has prerequisites of its own, is phony, or is already being built.</p>
+<p>Those details belong to <a href="05_struct_file.html">struct file</a>. <code>struct dep</code> is the bridge from one file card to another.</p>
+<h2>Normal prerequisites: changes propagate upward</h2>
+<p>A normal prerequisite expresses the familiar Make rule:</p>
+<blockquote>
+<p>Build the prerequisite first. If it changed, or if it is newer than the target, the target may need rebuilding.</p>
+</blockquote>
+<p>For:</p>
+<pre><code class="language-make">app: main.o
+</code></pre>
+<p>if <code>main.o</code> is newer than <code>app</code>, Make should relink <code>app</code>.</p>
+<p>During the update walk, <code>update_file_1()</code> checks each dependency’s timestamp:</p>
+<pre><code class="language-c">d_mtime = file_mtime (d-&gt;file);
+
+if (! d-&gt;ignore_mtime)
+  {
+    deps_changed |= d-&gt;changed;
+  }
+</code></pre>
+<p>The important condition is:</p>
+<pre><code class="language-c">if (! d-&gt;ignore_mtime)
+</code></pre>
+<p>A normal dependency has <code>ignore_mtime == 0</code>, so it participates in the timestamp decision.</p>
+<p>Make also updates the edge’s <code>changed</code> bit:</p>
+<pre><code class="language-c">d-&gt;changed |= noexist || d_mtime &gt; this_mtime;
+</code></pre>
+<p>This means the dependency is considered changed when:</p>
+<ul>
+<li>the target does not exist, or</li>
+<li>the prerequisite is newer than the target.</li>
+</ul>
+<p>The bit is also set when Make actually rebuilt the prerequisite earlier in the same run.</p>
+<p>Think of a normal dependency arrow as a strong pull cord. If the prerequisite moves, the target is pulled along and may need rebuilding too.</p>
+<h2><code>changed</code>: one edge’s answer to “did this matter?”</h2>
+<p>The field is:</p>
+<pre><code class="language-c">unsigned int changed : 1;
+</code></pre>
+<p>It does not simply mean “the prerequisite file exists” or “the prerequisite was mentioned in the Makefile.”</p>
+<p>It means something more operational:</p>
+<blockquote>
+<p>Did this prerequisite change in a way relevant to this target’s update decision?</p>
+</blockquote>
+<p>Suppose this is the state:</p>
+<pre><code class="language-text">app exists and is older
+main.o was rebuilt
+util.o did not change
+</code></pre>
+<p>The dependency records may end up conceptually like:</p>
+<pre><code class="language-text">main.o changed: 1
+util.o changed: 0
+</code></pre>
+<p>Make uses this information for both rebuild decisions and automatic variables.</p>
+<p>The <code>$?</code> automatic variable contains normal prerequisites that changed:</p>
+<pre><code class="language-make">app: main.o util.o
+	@echo changed prerequisites are $?
+</code></pre>
+<p><code>set_file_variables()</code> in <code>src/commands.c</code> checks the same bit:</p>
+<pre><code class="language-c">if (d-&gt;changed || always_make_flag)
+  {
+    qp = mempcpy (qp, c, len);
+  }
+</code></pre>
+<p>So <code>struct dep.changed</code> directly helps produce <code>$?</code>.</p>
+<p>This is a useful connection:</p>
+<pre><code class="language-text">timestamp comparison
+    ↓
+dep changed bit
+    ↓
+rebuild decision and automatic variable value
+</code></pre>
+<p>The dependency edge remembers the result of Make’s earlier reasoning so that later stages do not need to rediscover it.</p>
+<h2>Order-only prerequisites: required, but not timestamp triggers</h2>
+<p>Now consider a common build-directory rule:</p>
+<pre><code class="language-make">app: main.o | build
+	$(CC) -o $@ main.o
+</code></pre>
+<pre><code class="language-make">build:
+	mkdir -p $@
+</code></pre>
+<p>The <code>build</code> directory must exist before the recipe can place output inside it. But directories often receive a newer timestamp whenever files are created or removed inside them.</p>
+<p>If <code>build</code> were a normal prerequisite, every directory timestamp change could force unnecessary relinking.</p>
+<p>The vertical bar creates an <strong>order-only prerequisite</strong>:</p>
+<pre><code class="language-make">app: main.o | build
+</code></pre>
+<p>The parser divides the prerequisite list at <code>|</code>.</p>
+<pre><code class="language-c">struct dep *
+split_prereqs (char *p)
+{
+  struct dep *new = PARSE_FILE_SEQ (&amp;p, struct dep, MAP_PIPE,
+                                    NULL, PARSEFS_WAIT);
+</code></pre>
+<p>If text remains after the pipe, Make parses it separately:</p>
+<pre><code class="language-c">ood = PARSE_FILE_SEQ (&amp;p, struct dep, MAP_NUL,
+                      NULL, PARSEFS_WAIT);
+</code></pre>
+<p>Then it marks every dependency after the pipe:</p>
+<pre><code class="language-c">for (; ood != NULL; ood = ood-&gt;next)
+  ood-&gt;ignore_mtime = 1;
+</code></pre>
+<p>The field is:</p>
+<pre><code class="language-c">unsigned int ignore_mtime : 1;
+</code></pre>
+<p>The name is precise. An order-only prerequisite is not ignored. Make still builds it first if necessary. Its <strong>modification time</strong> is what Make ignores when deciding whether the target is stale.</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th style="text-align:right">Normal prerequisite</th>
+<th style="text-align:right">Order-only prerequisite</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Must be updated before target</td>
+<td style="text-align:right">yes</td>
+<td style="text-align:right">yes</td>
+</tr>
+<tr>
+<td>Missing prerequisite can block target</td>
+<td style="text-align:right">yes</td>
+<td style="text-align:right">yes</td>
+</tr>
+<tr>
+<td>Newer timestamp can remake target</td>
+<td style="text-align:right">yes</td>
+<td style="text-align:right">no</td>
+</tr>
+<tr>
+<td>Appears in <code>$^</code></td>
+<td style="text-align:right">yes</td>
+<td style="text-align:right">no</td>
+</tr>
+<tr>
+<td>Appears in `$</td>
+<td style="text-align:right">`</td>
+<td style="text-align:right">no</td>
+</tr>
+<tr>
+<td>Can appear in <code>$?</code></td>
+<td style="text-align:right">yes</td>
+<td style="text-align:right">no</td>
+</tr>
+</tbody>
+</table>
+<p>An order-only dependency is like requiring that a workshop be unlocked before work begins. Opening or closing the door does not mean the product itself must be rebuilt.</p>
+<h2>Why order-only prerequisites still matter</h2>
+<p>It would be a mistake to think <code>ignore_mtime</code> means “skip this dependency.”</p>
+<p>In <code>update_file_1()</code>, Make still traverses every prerequisite:</p>
+<pre><code class="language-c">new = check_dep (d-&gt;file, depth, this_mtime, &amp;maybe_make);
+</code></pre>
+<p>So an order-only prerequisite may be built, may fail, and may delay the target.</p>
+<p>Only after that does Make decide whether its result affects <code>must_make</code>:</p>
+<pre><code class="language-c">if (! d-&gt;ignore_mtime)
+  must_make = maybe_make;
+</code></pre>
+<p>A normal prerequisite can change <code>must_make</code>. An order-only one cannot.</p>
+<p>For example:</p>
+<pre><code class="language-make">report.txt: data.csv | output
+	tool data.csv &gt; output/report.txt
+</code></pre>
+<p>If <code>output</code> is missing, Make creates it. If <code>output</code> already exists but has a fresh timestamp, Make does not rebuild <code>report.txt</code> merely because the directory changed.</p>
+<p>That behavior is not a special case scattered through Make. It is a small flag attached to one graph edge.</p>
+<h2>Automatic variables read dependency metadata</h2>
+<p><code>struct dep</code> does not only guide the update engine. It also shapes recipe variables.</p>
+<p>For this rule:</p>
+<pre><code class="language-make">app: main.o util.o | build
+	@echo normal prerequisites: $^
+	@echo order only prerequisites: $|
+</code></pre>
+<p>Make computes:</p>
+<pre><code class="language-text">$^  = main.o util.o
+$|  = build
+</code></pre>
+<p>The code in <code>set_file_variables()</code> separates them:</p>
+<pre><code class="language-c">if (d-&gt;ignore_mtime)
+  {
+    bp = mempcpy (bp, c, len);
+  }
+else
+  {
+    cp = mempcpy (cp, c, len);
+  }
+</code></pre>
+<p>The <code>bp</code> buffer becomes <code>$|</code>; the <code>cp</code> buffer contributes to <code>$^</code>.</p>
+<p>Similarly, <code>$&lt;</code> skips order-only dependencies:</p>
+<pre><code class="language-c">for (d = file-&gt;deps; d != 0; d = d-&gt;next)
+  if (!d-&gt;ignore_mtime &amp;&amp; !d-&gt;ignore_automatic_vars
+      &amp;&amp; !d-&gt;need_2nd_expansion)
+</code></pre>
+<p>So <code>$&lt;</code> is the first normal prerequisite, not merely the first dependency record in the list.</p>
+<p>This is an excellent example of why Make cannot represent dependencies as bare strings. Recipe expansion needs to know what kind of relationship each prerequisite has.</p>
+<p>Variable expansion itself is explained in <a href="03_variable_expand.html">variable_expand</a>, while automatic variables are attached to the target context through <a href="02_variable_set_list.html">variable_set_list</a>.</p>
+<h2>Delayed prerequisite text and <code>.SECONDEXPANSION</code></h2>
+<p>Most prerequisite lists are expanded while Make reads the Makefile:</p>
+<pre><code class="language-make">OBJECTS = main.o util.o
+
+app: $(OBJECTS)
+</code></pre>
+<p>The parser expands <code>$(OBJECTS)</code> and stores ordinary dependency records for <code>main.o</code> and <code>util.o</code>.</p>
+<p>But sometimes a prerequisite needs information that does not exist until Make is considering a specific target.</p>
+<p>For example:</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+
+app: $$(deps_for_$@)
+</code></pre>
+<p>The doubled dollar sign delays the reference. During initial parsing, Make cannot yet use <code>$@</code> as <code>app</code> in the ordinary way.</p>
+<p>When <code>.SECONDEXPANSION</code> is enabled and the prerequisite text contains <code>$</code>, <code>record_files()</code> preserves the text rather than splitting it immediately:</p>
+<pre><code class="language-c">if (second_expansion &amp;&amp; strchr (depstr, '$'))
+  {
+    deps = alloc_dep ();
+    deps-&gt;name = depstr;
+</code></pre>
+<p>Then it marks the special dependency record:</p>
+<pre><code class="language-c">deps-&gt;need_2nd_expansion = 1;
+</code></pre>
+<p>The field is:</p>
+<pre><code class="language-c">unsigned int need_2nd_expansion : 1;
+</code></pre>
+<p>At this stage, one <code>struct dep</code> may represent an entire <em>unexpanded prerequisite expression</em>, not just one final prerequisite file.</p>
+<p>Conceptually, Make stores:</p>
+<pre><code class="language-text">name: $$(deps_for_$@)
+file: null
+need second expansion: yes
+</code></pre>
+<p>This is like storing an unopened envelope rather than filing its contents immediately.</p>
+<h2>The second-expansion handoff</h2>
+<p>Later, when Make is about to consider a target, <code>expand_deps()</code> checks for deferred dependency records:</p>
+<pre><code class="language-c">if (! d-&gt;name || ! d-&gt;need_2nd_expansion)
+  {
+    dp = &amp;d-&gt;next;
+    d = d-&gt;next;
+    continue;
+  }
+</code></pre>
+<p>For a deferred record, Make prepares target-specific variables and automatic variables:</p>
+<pre><code class="language-c">initialize_file_variables (f, 0);
+set_file_variables (f, d-&gt;stem ? d-&gt;stem : f-&gt;stem);
+</code></pre>
+<p>Then it expands the stored text in that target’s variable context:</p>
+<pre><code class="language-c">p = variable_expand_for_file (d-&gt;name, f);
+</code></pre>
+<p>Now <code>$@</code>, <code>$*</code>, target-specific variables, and matching pattern-specific variables can have meaningful values.</p>
+<p>Finally, Make parses the result into ordinary dependency records:</p>
+<pre><code class="language-c">new = split_prereqs (p);
+</code></pre>
+<p>The placeholder dependency is removed and replaced with the newly parsed chain.</p>
+<p>For example:</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+
+app: $$(deps_for_$@)
+deps_for_app = main.o util.o
+</code></pre>
+<p>The lifecycle is:</p>
+<pre><code class="language-text">initial parse:
+  one deferred dep containing dependency expression
+
+target consideration:
+  expand expression with target name app
+
+final graph:
+  app → main.o
+  app → util.o
+</code></pre>
+<p>A deferred dependency is therefore not a missing file pointer by accident. It is deliberately incomplete until the correct target context exists.</p>
+<h2>Secondary expansion and target-specific variables</h2>
+<p>Second expansion becomes especially useful with target-specific variables.</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+
+debug: objects = main-debug.o util-debug.o
+release: objects = main-release.o util-release.o
+
+debug release: $$(objects)
+</code></pre>
+<p>During the first parse, the prerequisite text remains deferred.</p>
+<p>Later:</p>
+<ul>
+<li>while considering <code>debug</code>, Make sees <code>objects = main-debug.o util-debug.o</code>;</li>
+<li>while considering <code>release</code>, Make sees <code>objects = main-release.o util-release.o</code>.</li>
+</ul>
+<p>That works because <code>expand_deps()</code> calls <code>variable_expand_for_file()</code>, which temporarily activates the target’s variable scope chain.</p>
+<p>The scope chain is covered in <a href="02_variable_set_list.html">variable_set_list</a>. The important dependency lesson is:</p>
+<blockquote>
+<p><code>need_2nd_expansion</code> tells Make that this edge cannot be finalized until the target’s variable world is available.</p>
+</blockquote>
+<h2><code>staticpattern</code> and the meaning of <code>%</code></h2>
+<p>The field:</p>
+<pre><code class="language-c">unsigned int staticpattern : 1;
+</code></pre>
+<p>is used for dependencies belonging to static pattern rules.</p>
+<p>A static pattern rule looks like this:</p>
+<pre><code class="language-make">objects = main.o util.o
+
+$(objects): %.o: %.c
+	$(CC) -c $&lt; -o $@
+</code></pre>
+<p>Here <code>%</code> is not an ordinary filename character. It stands for the stem matched from each target:</p>
+<pre><code class="language-text">main.o → main.c
+util.o → util.c
+</code></pre>
+<p>For normal static-pattern prerequisites, <code>enter_prereqs()</code> replaces <code>%</code> using the target’s stem.</p>
+<pre><code class="language-c">if (stem)
+  {
+    const char *pattern = &quot;%&quot;;
+    ...
+    o = patsubst_expand_pat (variable_buffer, stem, pattern, nm,
+                             pattern+1, percent+1);
+  }
+</code></pre>
+<p>Then it records the stem on the dependency:</p>
+<pre><code class="language-c">dp-&gt;stem = stem;
+dp-&gt;staticpattern = 1;
+</code></pre>
+<p>Why preserve this information?</p>
+<p>Because secondary expansion can delay processing. If a static-pattern prerequisite needs a second expansion, Make must later know that <code>%</code> should behave like the relevant target’s stem.</p>
+<p>Inside <code>expand_deps()</code>, Make translates <code>%</code> into <code>$*</code> before the delayed expansion:</p>
+<pre><code class="language-c">*(s++) = '$';
+*(s++) = '*';
+</code></pre>
+<p>That avoids expanding a literal stem more than once. <code>$*</code> is an automatic variable whose value is already prepared for the target.</p>
+<p>The basic pattern-rule machinery is the subject of <a href="07_struct_rule.html">struct rule</a>. Here, the main point is that <code>staticpattern</code> tells a dependency edge, “my name came from a stem-based rule, so preserve that context.”</p>
+<h2>Explicitness and intermediate files</h2>
+<p>The field:</p>
+<pre><code class="language-c">unsigned int is_explicit : 1;
+</code></pre>
+<p>is mostly important during implicit-rule search.</p>
+<p>Suppose Make needs <code>program</code>, and it finds an implicit route:</p>
+<pre><code class="language-text">program ← program.o ← program.c
+</code></pre>
+<p>The object file may be a temporary intermediate artifact. But if <code>program.o</code> was explicitly named elsewhere, Make should be more cautious about treating it as disposable.</p>
+<p>When implicit-rule search examines a prerequisite, it records whether the prerequisite was written explicitly in the rule:</p>
+<pre><code class="language-c">d-&gt;is_explicit = is_explicit;
+</code></pre>
+<p>Later, it combines that edge-level fact with the target file’s own <code>is_explicit</code> state:</p>
+<pre><code class="language-c">if (df &amp;&amp; !df-&gt;is_explicit &amp;&amp; !d-&gt;is_explicit)
+  df-&gt;intermediate = 1;
+</code></pre>
+<p>Read that as:</p>
+<ul>
+<li>if the prerequisite file was not explicitly mentioned elsewhere, and</li>
+<li>this dependency was not explicitly named in the current rule,</li>
+</ul>
+<p>then Make may classify it as an intermediate file.</p>
+<p>This is another place where the edge matters separately from the node.</p>
+<p>A <code>struct file</code> can say:</p>
+<pre><code class="language-text">I am main.o.
+</code></pre>
+<p>A <code>struct dep</code> can say:</p>
+<pre><code class="language-text">main.o was inferred through this pattern-rule path.
+</code></pre>
+<p>That distinction helps Make decide whether the file is a durable project artifact or a temporary stepping stone.</p>
+<h2><code>.EXTRA_PREREQS</code> and hidden recipe inputs</h2>
+<p>GNU Make supports <code>.EXTRA_PREREQS</code>, which adds prerequisites to targets without putting them into ordinary automatic variables.</p>
+<p>For example:</p>
+<pre><code class="language-make">app: .EXTRA_PREREQS = config.stamp
+</code></pre>
+<p>The target should wait for <code>config.stamp</code>, and changes to it can remake <code>app</code>. But sometimes a Makefile author does not want the extra prerequisite to appear in <code>$^</code> or <code>$&lt;</code>.</p>
+<p>That behavior uses:</p>
+<pre><code class="language-c">unsigned int ignore_automatic_vars : 1;
+</code></pre>
+<p>When Make expands extra prerequisites, it marks them:</p>
+<pre><code class="language-c">d-&gt;ignore_automatic_vars = 1;
+</code></pre>
+<p>The helper is:</p>
+<pre><code class="language-c">struct dep *
+expand_extra_prereqs (const struct variable *extra)
+{
+  struct dep *prereqs =
+    extra ? split_prereqs (variable_expand (extra-&gt;value)) : NULL;
+</code></pre>
+<p>The dependency is real for scheduling and timestamp checks. It is simply hidden from the standard automatic variable lists.</p>
+<p><code>set_file_variables()</code> consistently filters these edges:</p>
+<pre><code class="language-c">if (d-&gt;need_2nd_expansion || d-&gt;ignore_automatic_vars)
+  continue;
+</code></pre>
+<p>This is like an internal checklist item on a work order. It must be completed before the job, but it is not printed on the public materials list.</p>
+<h2><code>.WAIT</code>: a barrier between prerequisite groups</h2>
+<p>GNU Make can represent ordering barriers within a prerequisite list:</p>
+<pre><code class="language-make">all: first second .WAIT third fourth
+</code></pre>
+<p>The intended meaning is:</p>
+<ol>
+<li><code>first</code> and <code>second</code> may run in parallel.</li>
+<li><code>third</code> and <code>fourth</code> must wait until the earlier group has completed.</li>
+<li><code>third</code> and <code>fourth</code> may then run in parallel with each other.</li>
+</ol>
+<p>The <code>.WAIT</code> token is not retained as an ordinary prerequisite file. Instead, the parser sees it and sets a flag for the dependency after it.</p>
+<p>Inside <code>parse_file_seq()</code>:</p>
+<pre><code class="language-c">if (ANY_SET (flags, PARSEFS_WAIT)
+    &amp;&amp; p - s == CSTRLEN (&quot;.WAIT&quot;)
+    &amp;&amp; memcmp (s, &quot;.WAIT&quot;, CSTRLEN (&quot;.WAIT&quot;)) == 0)
+</code></pre>
+<p>Make records that it found a barrier:</p>
+<pre><code class="language-c">found_wait = 1;
+continue;
+</code></pre>
+<p>When it creates the next dependency record, it transfers the marker:</p>
+<pre><code class="language-c">if (found_wait) {
+  ((struct dep*)_ns)-&gt;wait_here = 1;
+  found_wait = 0;
+}
+</code></pre>
+<p>So this Makefile:</p>
+<pre><code class="language-make">all: first second .WAIT third fourth
+</code></pre>
+<p>produces a dependency shape like:</p>
+<pre><code class="language-text">first   wait_here: 0
+second  wait_here: 0
+third   wait_here: 1
+fourth  wait_here: 0
+</code></pre>
+<p>The barrier belongs to <code>third</code>, not to a separate <code>.WAIT</code> file node.</p>
+<p>That is a neat representation: the edge says, “before crossing into me, wait for earlier work.”</p>
+<h2>How <code>.WAIT</code> affects parallel scheduling</h2>
+<p>While Make scans a target’s prerequisites, it tracks whether any previous prerequisite jobs are still running:</p>
+<pre><code class="language-c">int running = 0;
+</code></pre>
+<p>Before processing the next dependency, it checks the barrier bit:</p>
+<pre><code class="language-c">if (d-&gt;wait_here &amp;&amp; running)
+  break;
+</code></pre>
+<p>If Make reaches a dependency marked <code>wait_here</code> while earlier work is still running, it stops scanning there for now.</p>
+<p>On a later pass, after those jobs finish, Make can continue beyond the barrier.</p>
+<p>This produces the desired behavior:</p>
+<pre><code class="language-text">first and second begin
+    ↓
+Make reaches third and sees wait marker
+    ↓
+Make pauses later prerequisites
+    ↓
+first and second complete
+    ↓
+third and fourth may begin
+</code></pre>
+<p><code>.WAIT</code> is not a global “turn off parallelism” switch. It is a local fence in one dependency list.</p>
+<p>It is like placing a gate in an assembly line:</p>
+<pre><code class="language-text">parallel preparation work
+    ↓
+quality gate
+    ↓
+parallel packaging work
+</code></pre>
+<p>The update engine itself is covered more fully in <a href="08_update_goal_chain.html">update_goal_chain</a>, but <code>wait_here</code> is the small piece of edge metadata that gives it this scheduling instruction.</p>
+<h2><code>.WAIT</code> also works around the order-only split</h2>
+<p>Because <code>.WAIT</code> is processed while parsing file sequences, it can appear among normal or order-only prerequisites.</p>
+<p>For example:</p>
+<pre><code class="language-make">app: objects .WAIT generated.h | build
+</code></pre>
+<p>The barrier applies before <code>generated.h</code>.</p>
+<p>Or:</p>
+<pre><code class="language-make">app: objects | build .WAIT cache
+</code></pre>
+<p>The barrier applies before <code>cache</code> within the order-only portion.</p>
+<p>When Make prints its database, <code>print_prereqs()</code> reconstructs the marker:</p>
+<pre><code class="language-c">printf (&quot; %s%s&quot;, deps-&gt;wait_here ? &quot;.WAIT &quot; : &quot;&quot;,
+        dep_name (deps));
+</code></pre>
+<p>This is a good reminder that <code>.WAIT</code> is stored as a bit on a nearby dependency edge, then converted back into familiar Makefile syntax for diagnostics.</p>
+<h2><code>shuf</code>: a second route through the same dependencies</h2>
+<p>The <code>shuf</code> field is:</p>
+<pre><code class="language-c">struct dep *shuf;
+</code></pre>
+<p>The normal <code>next</code> pointer preserves the parsed dependency order:</p>
+<pre><code class="language-text">first → second → third
+</code></pre>
+<p>But Make’s <code>--shuffle</code> option can create another traversal order through the same records.</p>
+<p>When the update engine selects the current dependency, it chooses:</p>
+<pre><code class="language-c">d = du-&gt;shuf ? du-&gt;shuf : du;
+</code></pre>
+<p>Likewise, top-level goals may use shuffled links.</p>
+<p>The key design is that Make does not need to physically reorder the original <code>next</code> chain. It can preserve the canonical list and add a second link path for a shuffled traversal.</p>
+<p>That is like keeping a book’s pages in publication order while adding a separate reading itinerary:</p>
+<pre><code class="language-text">physical page order:  chapter one, chapter two, chapter three
+study order:          chapter two, chapter one, chapter three
+</code></pre>
+<p>The <code>shuf</code> pointer matters especially for testing. Shuffling prerequisites can reveal Makefiles that accidentally depend on an unstated ordering relationship.</p>
+<p>For example, this is unsafe:</p>
+<pre><code class="language-make">app: generated.h main.o
+</code></pre>
+<p>if <code>main.o</code> actually needs <code>generated.h</code> but does not declare it. A shuffle may expose the missing edge.</p>
+<p>A correct graph should state the relationship directly:</p>
+<pre><code class="language-make">main.o: generated.h
+app: main.o
+</code></pre>
+<h2>Why dependency records keep duplicates</h2>
+<p><code>struct file.deps</code> is documented as containing:</p>
+<pre><code class="language-c">struct dep *deps;  /* all dependencies, including duplicates */
+</code></pre>
+<p>That is intentional.</p>
+<p>Suppose a Makefile says:</p>
+<pre><code class="language-make">app: main.o util.o main.o
+</code></pre>
+<p>Make may retain the duplicate dependency records because some automatic variables preserve listing behavior.</p>
+<p>For example:</p>
+<ul>
+<li><code>$+</code> keeps duplicates in Makefile order.</li>
+<li><code>$^</code> removes duplicates.</li>
+<li><code>$?</code> removes duplicates among changed normal prerequisites.</li>
+</ul>
+<p>The dependency list retains the original information; recipe-variable construction decides how much to normalize.</p>
+<p>Inside <code>set_file_variables()</code>, Make first computes <code>$+</code> by walking the dependency list directly. Later it builds a hash table to remove duplicates for <code>$^</code>, <code>$?</code>, and <code>$|</code>.</p>
+<pre><code class="language-c">hash_init (&amp;dep_hash, 500, dep_hash_1, dep_hash_2, dep_hash_cmp);
+</code></pre>
+<p>This separation is useful:</p>
+<pre><code class="language-text">struct dep list preserves what was declared
+automatic-variable logic chooses the view to present
+</code></pre>
+<p>It is like retaining a complete invoice with repeated line items, then producing a summary report that combines identical products.</p>
+<h2><code>flags</code>: shared policy bits</h2>
+<p>The <code>flags</code> field is:</p>
+<pre><code class="language-c">unsigned int flags : 8;
+</code></pre>
+<p>For ordinary <code>struct dep</code> records attached to target files, this field is not the main star of the dependency update logic shown in this chapter.</p>
+<p>Its importance becomes clearer because <code>DEP()</code> is reused by <code>struct goaldep</code>:</p>
+<pre><code class="language-c">struct goaldep
+  {
+    DEP (struct goaldep);
+    int error;
+    floc floc;
+  };
+</code></pre>
+<p>A <code>struct goaldep</code> is a dependency-shaped record for a top-level goal or Makefile being read.</p>
+<p>For example, Makefile-reading code creates a goal dependency with flags such as:</p>
+<pre><code class="language-c">RM_INCLUDED
+RM_DONTCARE
+RM_NO_DEFAULT_GOAL
+</code></pre>
+<p>Those flags describe policies such as:</p>
+<ul>
+<li>this file came from <code>include</code>;</li>
+<li>failure to find it may be acceptable;</li>
+<li>its rules should not set the default goal.</li>
+</ul>
+<p>The constants are defined in <code>dep.h</code>:</p>
+<pre><code class="language-c">#define RM_NO_DEFAULT_GOAL      (1 &lt;&lt; 0)
+#define RM_INCLUDED             (1 &lt;&lt; 1)
+#define RM_DONTCARE             (1 &lt;&lt; 2)
+#define RM_NO_TILDE             (1 &lt;&lt; 3)
+</code></pre>
+<p>This reuse is a practical C design choice. Both ordinary prerequisites and top-level goals need:</p>
+<ul>
+<li>a name or file pointer;</li>
+<li>a linked-list next pointer;</li>
+<li>a possible shuffled traversal link;</li>
+<li>a changed bit;</li>
+<li>some flags.</li>
+</ul>
+<p>But <code>goaldep</code> adds information specific to reading Makefiles:</p>
+<pre><code class="language-c">int error;
+floc floc;
+</code></pre>
+<p>The idea is:</p>
+<pre><code class="language-text">struct dep     = an ordinary edge from one target to one prerequisite
+struct goaldep = a dependency-shaped entry point with source and error data
+</code></pre>
+<h2>Goal dependencies at startup</h2>
+<p>When you run:</p>
+<pre><code class="language-sh">make app
+</code></pre>
+<p><code>main.c</code> enters <code>app</code> as a file record, then creates a goal record:</p>
+<pre><code class="language-c">lastgoal = alloc_goaldep ();
+lastgoal-&gt;file = f;
+</code></pre>
+<p>This is the root of the later update walk.</p>
+<p>The update engine receives a chain of <code>struct goaldep</code> records:</p>
+<pre><code class="language-c">enum update_status
+update_goal_chain (struct goaldep *goaldeps)
+</code></pre>
+<p>It copies that chain using the generic dependency-copy helper:</p>
+<pre><code class="language-c">struct dep *goals_orig = copy_dep_chain ((struct dep *)goaldeps);
+</code></pre>
+<p>The cast works because <code>struct goaldep</code> begins with the same <code>DEP()</code> fields as <code>struct dep</code>.</p>
+<p>This may look unusual at first, but the shared layout is deliberate. It lets Make use generic chain operations while preserving extra goal-only metadata where needed.</p>
+<h2>Copying a dependency chain</h2>
+<p>Dependency lists are frequently copied.</p>
+<p>For example, a static pattern rule with several targets cannot attach the <em>same</em> prerequisite nodes to every target. Each target needs its own independently owned chain.</p>
+<p>In <code>record_files()</code>:</p>
+<pre><code class="language-c">this = nextf != 0 ? copy_dep_chain (deps) : deps;
+</code></pre>
+<p>All but the final target receive copied dependencies; the final target takes ownership of the original chain.</p>
+<p>Likewise, grouped targets and implicit-rule searches copy dependency data when they need structurally separate graph edges.</p>
+<p>Why not share one chain?</p>
+<p>Because Make may later modify individual edges:</p>
+<ul>
+<li>resolve a name into a <code>file</code> pointer;</li>
+<li>replace a deferred second-expansion placeholder;</li>
+<li>mark <code>changed</code>;</li>
+<li>set <code>wait_here</code>;</li>
+<li>add shuffle links;</li>
+<li>remove a circular edge.</li>
+</ul>
+<p>Sharing would make one target’s update state accidentally rewrite another target’s graph.</p>
+<p>Each target needs its own set of arrows, even when those arrows initially point to the same prerequisite names.</p>
+<h2>A full lifecycle for one dependency</h2>
+<p>Consider:</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+
+app: main.o | build
+app: $$(extra_for_$@)
+extra_for_app = generated/config.h
+</code></pre>
+<p>One dependency can travel through these stages.</p>
+<h3>1. Parsing</h3>
+<p><code>main.o</code> becomes an ordinary dependency record:</p>
+<pre><code class="language-text">file: main.o file record
+ignore_mtime: 0
+need_2nd_expansion: 0
+</code></pre>
+<p><code>build</code> becomes another record:</p>
+<pre><code class="language-text">file: build file record
+ignore_mtime: 1
+need_2nd_expansion: 0
+</code></pre>
+<p>The delayed expression becomes a placeholder:</p>
+<pre><code class="language-text">name: $$(extra_for_$@)
+file: null
+need_2nd_expansion: 1
+</code></pre>
+<h3>2. Target consideration</h3>
+<p>When Make considers <code>app</code>, it expands the placeholder with <code>$@ = app</code>.</p>
+<pre><code class="language-text">$$(extra_for_$@)
+    ↓
+generated/config.h
+</code></pre>
+<p>The placeholder is replaced with an ordinary dependency edge pointing at the <code>generated/config.h</code> file record.</p>
+<h3>3. Prerequisite updates</h3>
+<p>Make recursively updates:</p>
+<pre><code class="language-text">main.o
+build
+generated/config.h
+</code></pre>
+<p>For each edge, Make records whether it changed.</p>
+<h3>4. Target decision</h3>
+<ul>
+<li>A changed <code>main.o</code> can trigger rebuilding <code>app</code>.</li>
+<li>A changed <code>generated/config.h</code> can trigger rebuilding <code>app</code>.</li>
+<li>A changed <code>build</code> directory cannot trigger rebuilding <code>app</code>, because it is order-only.</li>
+</ul>
+<h3>5. Recipe variables</h3>
+<p>Make prepares:</p>
+<pre><code class="language-text">$^  = main.o generated/config.h
+$|  = build
+$?  = changed normal prerequisites only
+</code></pre>
+<p>The dependency records are the source data for all of those lists.</p>
+<h2>The path through Make</h2>
+<p>Here is the broad flow from prerequisite text to target update.</p>
+<pre class="mermaid">sequenceDiagram
+    participant Parser
+    participant Deps
+    participant Files
+    participant Update
+    participant Jobs
+    Parser->>Deps: Parse prerequisite names and annotations
+    Deps->>Files: Connect prerequisite names to file records
+    Update->>Deps: Check each dependency edge
+    Deps->>Update: Report ordering and change information
+    Update->>Jobs: Start target recipe when needed
+</pre>
+<p>The important part is that the dependency object stays relevant throughout the build:</p>
+<ul>
+<li>parsing creates it;</li>
+<li>graph construction connects it;</li>
+<li>secondary expansion may replace it;</li>
+<li>update traversal reads and writes its status;</li>
+<li>recipe setup reads it to create automatic variables;</li>
+<li>shuffling may add a second traversal path.</li>
+</ul>
+<p>A dependency edge is not temporary parser debris. It is active build-state data.</p>
+<h2>Reading <code>struct dep</code> in the source</h2>
+<p>When you first explore this area of GNU Make, these locations provide a useful map:</p>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Main location</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What fields describe one dependency?</td>
+<td><code>struct dep</code> and <code>DEP()</code> in <code>src/dep.h</code></td>
+</tr>
+<tr>
+<td>How are prerequisite names split at `</td>
+<td>`?</td>
+</tr>
+<tr>
+<td>How is <code>.WAIT</code> recognized?</td>
+<td><code>parse_file_seq()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>How do names become file records?</td>
+<td><code>enter_prereqs()</code> in <code>src/file.c</code></td>
+</tr>
+<tr>
+<td>Where is delayed secondary expansion performed?</td>
+<td><code>expand_deps()</code> in <code>src/file.c</code></td>
+</tr>
+<tr>
+<td>Where are dependencies checked for timestamps and changes?</td>
+<td><code>update_file_1()</code> in <code>src/remake.c</code></td>
+</tr>
+<tr>
+<td>Where does Make honor <code>.WAIT</code> barriers?</td>
+<td><code>update_file_1()</code> in <code>src/remake.c</code></td>
+</tr>
+<tr>
+<td>Where are <code>$^</code>, <code>$+</code>, <code>$?</code>, and `$</td>
+<td>` assembled?</td>
+</tr>
+<tr>
+<td>Where are implicit-rule dependency flags copied?</td>
+<td><code>pattern_search()</code> in <code>src/implicit.c</code></td>
+</tr>
+<tr>
+<td>Where are dependencies printed by <code>make -p</code>?</td>
+<td><code>print_prereqs()</code> in <code>src/file.c</code></td>
+</tr>
+</tbody>
+</table>
+<p>A productive debugging question is:</p>
+<blockquote>
+<p>Is this prerequisite still text, already linked to a file, waiting for second expansion, or carrying an update result?</p>
+</blockquote>
+<p>The answer explains why some <code>struct dep</code> fields are populated while others are still empty.</p>
+<h2>Practical debugging with <code>make -d</code> and <code>make -p</code></h2>
+<p>When dependencies behave unexpectedly, start by asking what Make thinks the edges are.</p>
+<p>Use:</p>
+<pre><code class="language-sh">make -p
+</code></pre>
+<p>This prints Make’s database. A rule may appear as:</p>
+<pre><code class="language-text">app: main.o util.o | build
+</code></pre>
+<p>If <code>.WAIT</code> is present, Make prints it back near the marked dependency:</p>
+<pre><code class="language-text">all: first second .WAIT third fourth
+</code></pre>
+<p>For timestamp and rebuild reasoning, use:</p>
+<pre><code class="language-sh">make --debug=b
+</code></pre>
+<p>or:</p>
+<pre><code class="language-sh">make -d
+</code></pre>
+<p>You may see messages such as:</p>
+<pre><code class="language-text">Prerequisite 'main.o' is newer than target 'app'.
+Prerequisite 'build' is order-only for target 'app'.
+Must remake target 'app'.
+</code></pre>
+<p>Those messages correspond closely to the <code>ignore_mtime</code> and <code>changed</code> fields described in this chapter.</p>
+<p>For secondary expansion, a small diagnostic is often enough:</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+
+app: $$(info checking $@)$$(deps_for_$@)
+</code></pre>
+<p>The doubled dollars ensure that the <code>info</code> call waits for second expansion, when <code>$@</code> has the target value.</p>
+<h2>A compact mental model</h2>
+<p>You can summarize <code>struct dep</code> as one annotated arrow:</p>
+<pre><code class="language-text">target ──[dependency policy]──&gt; prerequisite
+</code></pre>
+<p>The most important annotations are:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Question it answers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>next</code></td>
+<td>What is the next prerequisite in this target’s list?</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>What prerequisite text is still waiting to be resolved?</td>
+</tr>
+<tr>
+<td><code>file</code></td>
+<td>Which <code>struct file</code> does this edge point to?</td>
+</tr>
+<tr>
+<td><code>shuf</code></td>
+<td>Is there an alternate shuffled traversal order?</td>
+</tr>
+<tr>
+<td><code>stem</code></td>
+<td>Which static-pattern stem belongs to this dependency?</td>
+</tr>
+<tr>
+<td><code>changed</code></td>
+<td>Did this prerequisite matter to the target’s update?</td>
+</tr>
+<tr>
+<td><code>ignore_mtime</code></td>
+<td>Is this prerequisite order-only?</td>
+</tr>
+<tr>
+<td><code>staticpattern</code></td>
+<td>Did this dependency originate in a static pattern rule?</td>
+</tr>
+<tr>
+<td><code>need_2nd_expansion</code></td>
+<td>Must Make expand this prerequisite text later?</td>
+</tr>
+<tr>
+<td><code>ignore_automatic_vars</code></td>
+<td>Should this edge stay out of <code>$^</code>, <code>$&lt;</code>, and related variables?</td>
+</tr>
+<tr>
+<td><code>is_explicit</code></td>
+<td>Was this prerequisite explicitly named for implicit-rule purposes?</td>
+</tr>
+<tr>
+<td><code>wait_here</code></td>
+<td>Must earlier prerequisite work finish before this edge is considered?</td>
+</tr>
+</tbody>
+</table>
+<h2>Key takeaways</h2>
+<p><code>struct dep</code> represents one prerequisite relationship, not merely one filename.</p>
+<p>It lets GNU Make preserve the meaning of different dependency forms:</p>
+<pre><code class="language-make">target: normal-prerequisite
+target: normal-prerequisite | order-only-prerequisite
+target: earlier-work .WAIT later-work
+target: $$(deferred_prerequisites)
+</code></pre>
+<p>The same dependency record can carry:</p>
+<ul>
+<li>a raw name before Make has entered it into the file database;</li>
+<li>a pointer to the prerequisite’s <code>struct file</code>;</li>
+<li>timestamp policy through <code>ignore_mtime</code>;</li>
+<li>update results through <code>changed</code>;</li>
+<li>delayed expansion state through <code>need_2nd_expansion</code>;</li>
+<li>static-pattern context through <code>stem</code> and <code>staticpattern</code>;</li>
+<li>automatic-variable visibility through <code>ignore_automatic_vars</code>;</li>
+<li>parallel-ordering barriers through <code>wait_here</code>;</li>
+<li>shuffled traversal links through <code>shuf</code>.</li>
+</ul>
+<p>Most importantly, dependencies are not all equal. A normal prerequisite says, “if I change, you may need rebuilding.” An order-only prerequisite says, “I must be ready first, but my timestamp should not pull you out of date.” A <code>.WAIT</code> marker says, “do not cross this point until earlier work settles.” A deferred dependency says, “you cannot even know my final name until the target context exists.”</p>
+<p>Now that the graph’s individual arrows are clear, you might wonder where Make stores reusable arrow patterns such as <code>%.o: %.c</code>, and how it chooses one when a target has no explicit recipe. That is the subject of <a href="07_struct_rule.html">struct rule</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="05_struct_file.html">&larr; struct file</a></span>
+    <span><a href="07_struct_rule.html">struct rule &rarr;</a></span>
+  </nav>
+</body>
+</html>

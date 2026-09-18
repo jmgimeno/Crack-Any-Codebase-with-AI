@@ -1,0 +1,941 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>eval — make-4.4.1</title>
+<style>
+  :root { --fg: #0d1117; --muted: #57606a; --bg: #fff; --soft: #f6f8fa; --accent: #0969da; --rule: #d0d7de; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         color: var(--fg); background: var(--bg); margin: 0 auto; max-width: 880px; padding: 32px 24px; }
+  h1 { font-size: 1.9em; margin: 0 0 .2em; }
+  h2 { font-size: 1.35em; margin: 1.8em 0 .4em; padding-bottom: .2em; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
+  p, li, td, th { color: var(--fg); }
+  p { margin: .8em 0; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 1.4em; }
+  li { margin: .35em 0; }
+  code { font: .9em/1.4 ui-monospace, "SF Mono", Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); padding: 14px 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .88em; }
+  pre.mermaid { background: var(--soft); padding: 16px; text-align: center; }
+  blockquote { border-left: 3px solid var(--rule); margin: 1em 0; padding: .2em 1em; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid var(--rule); padding: 8px 10px; text-align: left; font-size: .92em; }
+  th { background: var(--soft); }
+  .lens { display: inline-block; padding: 2px 8px; background: var(--soft); border-radius: 4px; font-size: .85em; }
+  nav.chapter-nav { margin: 2em 0 0; padding: 1em 0; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: .95em; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+</head>
+<body>
+  <p class="muted"><a href="index.html">&larr; make-4.4.1 tour</a></p>
+<h1>Chapter 4: eval</h1>
+<p>How can GNU Make look at these very different lines and know what each one means?</p>
+<pre><code class="language-make">CC := clang
+include config.mk
+app: main.o util.o
+	$(CC) -o $@ $^
+</code></pre>
+<p>One line defines a variable. One requests another Makefile. One creates a target and its prerequisites. One is a recipe line, even though it begins with a tab rather than a keyword.</p>
+<p>Now make the puzzle harder:</p>
+<pre><code class="language-make">$(eval generated: generated.c)
+$(eval 	@echo building $$@)
+</code></pre>
+<p>Those lines <em>create new Makefile syntax while Make is already reading Makefile syntax</em>.</p>
+<p>The component that keeps this organized is <code>eval()</code> in <code>src/read.c</code>. It is GNU Make’s central Makefile parser. It reads logical lines, distinguishes variable assignments, conditionals, include directives, target rules, prerequisites, and recipe lines, then records their meaning in Make's internal database.</p>
+<p>Think of it as a language interpreter reading a construction plan and filing each instruction into the correct project ledger:</p>
+<ul>
+<li>variables go into the variable ledger;</li>
+<li>targets go into the file ledger;</li>
+<li>prerequisites become dependency records;</li>
+<li>recipes are attached to targets;</li>
+<li>includes open another stack of plans;</li>
+<li>conditionals decide which instructions are currently active.</li>
+</ul>
+<p>The word <strong>eval</strong> appears in two closely related places:</p>
+<ol>
+<li><code>eval()</code> is the internal parser loop that reads Makefile text.</li>
+<li><code>$(eval ...)</code> is a Make function that feeds generated text back into that parser.</li>
+</ol>
+<p>The second is famous, but the first is the foundation. Without the parser loop, <code>$(eval ...)</code> would have nowhere to send its generated instructions.</p>
+<p>The variable-expansion engine from <a href="03_variable_expand.html">variable_expand</a> produces text. This chapter follows what happens when Make treats that text as fresh Makefile language.</p>
+<h2>Two ways Make gets text to parse</h2>
+<p>GNU Make can parse text from a real file:</p>
+<pre><code class="language-make">include config.mk
+</code></pre>
+<p>Or it can parse text already held in memory:</p>
+<pre><code class="language-make">$(eval MODE := debug)
+</code></pre>
+<p>Both routes eventually arrive at the same parser:</p>
+<pre><code class="language-c">static void
+eval (struct ebuffer *buffer, int flags)
+{
+  ...
+}
+</code></pre>
+<p>The parser does not need to know whether its instructions came from <code>Makefile</code>, an included file, the <code>-E</code> command-line option, or the <code>$(eval ...)</code> function. It receives an <code>ebuffer</code>, short for “evaluation buffer.”</p>
+<pre><code class="language-c">struct ebuffer
+  {
+    char *buffer;
+    char *bufnext;
+    char *bufstart;
+    FILE *fp;
+    floc floc;
+  };
+</code></pre>
+<p>The important ideas are:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>buffer</code></td>
+<td>current logical line</td>
+</tr>
+<tr>
+<td><code>bufnext</code></td>
+<td>where the next line begins</td>
+</tr>
+<tr>
+<td><code>bufstart</code></td>
+<td>start of the whole allocated buffer</td>
+</tr>
+<tr>
+<td><code>fp</code></td>
+<td>input file, or <code>NULL</code> for in-memory text</td>
+</tr>
+<tr>
+<td><code>floc</code></td>
+<td>file name and line information for diagnostics</td>
+</tr>
+</tbody>
+</table>
+<p>An <code>ebuffer</code> is like a reader’s bookmark and clipboard combined. It remembers where Make is reading, what the current line is, and where an error should be reported.</p>
+<p>For a normal Makefile, <code>fp</code> points to an open file stream. For generated text, <code>fp</code> is <code>NULL</code>.</p>
+<h2>Entering through a real Makefile</h2>
+<p>When Make reads an ordinary Makefile, <code>read_all_makefiles()</code> chooses files from sources such as:</p>
+<ul>
+<li>the <code>MAKEFILES</code> variable;</li>
+<li><code>-f FILE</code> command-line options;</li>
+<li>default names including <code>GNUmakefile</code>, <code>makefile</code>, and <code>Makefile</code>.</li>
+</ul>
+<p>It then calls <code>eval_makefile()</code>.</p>
+<pre><code class="language-c">static struct goaldep *
+eval_makefile (const char *filename, unsigned short flags)
+{
+  struct ebuffer ebuf;
+  ...
+}
+</code></pre>
+<p>After opening the file, <code>eval_makefile()</code> gives the parser an initial source location:</p>
+<pre><code class="language-c">ebuf.floc.filenm = filename;
+ebuf.floc.lineno = 1;
+ebuf.floc.offset = 0;
+</code></pre>
+<p>That location is why Make can report useful messages such as:</p>
+<pre><code class="language-text">Makefile:12: *** missing separator.  Stop.
+</code></pre>
+<p>The location information also becomes part of variable and recipe records. A variable’s <code>fileinfo</code> field was introduced in <a href="01_struct_variable.html">struct variable</a>, and recipes store similar source information in <code>struct commands</code>.</p>
+<p>Before parsing a Makefile, GNU Make also appends its name to <code>MAKEFILE_LIST</code>:</p>
+<pre><code class="language-c">do_variable_definition (&amp;ebuf.floc, &quot;MAKEFILE_LIST&quot;, filename,
+                        o_file, f_append_value, 0);
+</code></pre>
+<p>So this Makefile can reveal the reading order:</p>
+<pre><code class="language-make">$(info files read so far: $(MAKEFILE_LIST))
+</code></pre>
+<p>That is a useful debugging trick when several files include one another.</p>
+<h2>Entering through <code>$(eval ...)</code></h2>
+<p>The built-in <code>eval</code> function lives in <code>src/function.c</code>:</p>
+<pre><code class="language-c">static char *
+func_eval (char *o, char **argv, const char *funcname UNUSED)
+{
+  ...
+}
+</code></pre>
+<p>Its core action is remarkably small:</p>
+<pre><code class="language-c">install_variable_buffer (&amp;buf, &amp;len);
+
+eval_buffer (argv[0], NULL);
+
+restore_variable_buffer (buf, len);
+</code></pre>
+<p>The function temporarily gives the parser a separate expansion buffer, calls <code>eval_buffer()</code>, then restores the caller’s buffer.</p>
+<p>Why save and restore the buffer?</p>
+<p>Because <code>$(eval ...)</code> often appears while Make is already expanding another string. The expansion system uses a reusable global output buffer, described in <a href="03_variable_expand.html">variable_expand</a>. If parsing generated Makefile text reused that same workspace carelessly, it could overwrite the text currently being expanded.</p>
+<p>It is like putting your current worksheet aside before opening a new notebook. Finish the side task, then put the original worksheet back on the desk.</p>
+<p><code>eval_buffer()</code> wraps an in-memory string in an <code>ebuffer</code>:</p>
+<pre><code class="language-c">ebuf.size = strlen (buffer);
+ebuf.buffer = ebuf.bufnext = ebuf.bufstart = buffer;
+ebuf.fp = NULL;
+</code></pre>
+<p>Then it invokes the same central parser:</p>
+<pre><code class="language-c">eval (&amp;ebuf, 1);
+</code></pre>
+<p>The parser is shared. The source differs; the language rules do not.</p>
+<h2>The two expansion stages of <code>$(eval ...)</code></h2>
+<p>The most important rule about <code>$(eval ...)</code> is:</p>
+<blockquote>
+<p>Its argument is expanded before Make parses it as Makefile syntax.</p>
+</blockquote>
+<p>For example:</p>
+<pre><code class="language-make">TARGET = hello
+
+$(eval $(TARGET): hello.c)
+</code></pre>
+<p>The function argument expands first:</p>
+<pre><code class="language-text">$(TARGET): hello.c
+</code></pre>
+<p>becomes:</p>
+<pre><code class="language-make">hello: hello.c
+</code></pre>
+<p>Then <code>eval_buffer()</code> parses that result as a target rule.</p>
+<p>This is why <code>eval</code> is powerful. You can use variables, functions, <code>foreach</code>, and <code>call</code> to generate Makefile structures.</p>
+<pre><code class="language-make">PROGRAMS = client server
+
+$(foreach p,$(PROGRAMS),$(eval $(p): $(p).o))
+</code></pre>
+<p>Conceptually, Make generates:</p>
+<pre><code class="language-make">client: client.o
+server: server.o
+</code></pre>
+<p>Then it parses both rules normally.</p>
+<p>However, this also creates the classic dollar-sign problem. Suppose generated recipe text should contain <code>$@</code> for later recipe expansion:</p>
+<pre><code class="language-make">define make-rule
+$1:
+	@echo building $@
+endef
+</code></pre>
+<p>This does <strong>not</strong> work as intended:</p>
+<pre><code class="language-make">$(eval $(call make-rule,app))
+</code></pre>
+<p>During the first expansion, <code>$@</code> is expanded immediately. Outside a recipe context, it is usually empty. The parser receives something like:</p>
+<pre><code class="language-make">app:
+	@echo building
+</code></pre>
+<p>To preserve <code>$@</code> until the recipe runs, double the dollar sign:</p>
+<pre><code class="language-make">define make-rule
+$1:
+	@echo building $$@
+endef
+</code></pre>
+<p>Now the stages are:</p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Text</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>stored template</td>
+<td><code>$$@</code></td>
+</tr>
+<tr>
+<td>expansion for <code>eval</code></td>
+<td><code>$@</code></td>
+</tr>
+<tr>
+<td>stored recipe</td>
+<td><code>$@</code></td>
+</tr>
+<tr>
+<td>expansion for target recipe</td>
+<td><code>app</code></td>
+</tr>
+</tbody>
+</table>
+<p>This is the same Make-versus-shell boundary discussed in <a href="03_variable_expand.html">variable_expand</a>, but here there are two Make expansion opportunities rather than one.</p>
+<p>A useful mental model is:</p>
+<pre><code class="language-text">template source
+    ↓ first expansion
+generated Makefile text
+    ↓ parser
+stored rule or variable
+    ↓ later expansion when used
+final text
+</code></pre>
+<p>Each arrow may consume one level of dollar escaping.</p>
+<h2>Command-line <code>--eval</code> is related but different</h2>
+<p>GNU Make also accepts:</p>
+<pre><code class="language-sh">make --eval='MESSAGE := from command line'
+</code></pre>
+<p>or:</p>
+<pre><code class="language-sh">make -E 'MESSAGE := from command line'
+</code></pre>
+<p>In <code>main.c</code>, those strings are collected in <code>eval_strings</code>. Before Makefiles are read, Make evaluates each one:</p>
+<pre><code class="language-c">p = xstrdup (eval_strings-&gt;list[i]);
+eval_buffer (p, NULL);
+free (p);
+</code></pre>
+<p>This is related to <code>$(eval ...)</code>, but the timing differs:</p>
+<ul>
+<li><code>--eval</code> is processed during startup, before normal Makefiles;</li>
+<li><code>$(eval ...)</code> runs wherever expansion reaches it while Make is reading or expanding text.</li>
+</ul>
+<p>The command-line form is like handing the site manager an extra instruction before construction plans are opened. The function form is like inserting a newly generated instruction in the middle of reading the plans.</p>
+<h2>Reading logical lines, not merely physical lines</h2>
+<p>A Makefile is written in physical lines, separated by newline characters. But Make often reads <strong>logical lines</strong>.</p>
+<p>For example:</p>
+<pre><code class="language-make">SOURCES = main.c \
+          util.c \
+          net.c
+</code></pre>
+<p>This is three physical lines but one logical assignment.</p>
+<p>For in-memory <code>eval</code> text, <code>readstring()</code> finds a newline and checks whether it was escaped:</p>
+<pre><code class="language-c">while (p &gt; bol &amp;&amp; *(--p) == '\\')
+  backslash = !backslash;
+</code></pre>
+<p>An odd number of trailing backslashes means the newline is escaped, so Make continues reading. An even number means the backslashes escape one another and the newline ends the logical line.</p>
+<p>That detail matters for strings generated by <code>$(eval ...)</code>:</p>
+<pre><code class="language-make">$(eval FILES = one \
+two)
+</code></pre>
+<p>The generated text can contain a continuation just like a physical Makefile can.</p>
+<p>When reading from a real file, <code>readline()</code> performs the corresponding job with <code>fgets()</code>. It also handles long lines by growing the input buffer.</p>
+<p>The parser later performs another normalization step for most non-recipe text:</p>
+<pre><code class="language-c">collapse_continuations (collapsed);
+remove_comments (collapsed);
+</code></pre>
+<p>This turns line continuations into ordinary spacing and removes comments.</p>
+<p>So this:</p>
+<pre><code class="language-make">FLAGS = -Wall \ # compiler warnings
+        -Wextra
+</code></pre>
+<p>is interpreted approximately as:</p>
+<pre><code class="language-make">FLAGS = -Wall -Wextra
+</code></pre>
+<p>Recipe handling is intentionally different, because recipe text belongs to a shell language and Make should preserve more of its structure.</p>
+<h2>Recipe lines get first priority</h2>
+<p>A line beginning with the current recipe prefix is special. Normally that prefix is a tab.</p>
+<pre><code class="language-make">app: main.o
+	$(CC) -o $@ $^
+</code></pre>
+<p>Inside <code>eval()</code>, Make checks this before treating the line as an ordinary directive:</p>
+<pre><code class="language-c">if (line[0] == cmd_prefix)
+  {
+    ...
+  }
+</code></pre>
+<p>If Make has just read target names, it appends this line to the accumulated recipe text:</p>
+<pre><code class="language-c">memcpy (&amp;commands[commands_idx], line + 1, linelen - 1);
+commands_idx += linelen - 1;
+commands[commands_idx++] = '\n';
+</code></pre>
+<p>Notice <code>line + 1</code>: Make removes the recipe prefix character but retains the rest of the recipe exactly as text.</p>
+<p>Make does <strong>not</strong> execute the recipe now. It only records it for later. The command eventually becomes a <code>struct commands</code>, then is attached to a target’s <code>struct file</code>.</p>
+<p>That delayed execution is essential. Parsing a rule is like filing a work order. Running its commands happens only after Make decides the target needs rebuilding. The update process is covered in <a href="08_update_goal_chain.html">update_goal_chain</a>, and actual process creation appears in <a href="09_new_job.html">new_job</a>.</p>
+<p>A recipe prefix without a preceding target is an error:</p>
+<pre><code class="language-make">	@echo orphaned command
+</code></pre>
+<p>The parser diagnoses this as:</p>
+<pre><code class="language-text">recipe commences before first target
+</code></pre>
+<p>That is why accidentally replacing a tab with spaces is such a common Makefile mistake.</p>
+<h2>One parser loop, several ledgers</h2>
+<p>The central <code>eval()</code> function carries temporary state while it reads lines:</p>
+<pre><code class="language-c">char *commands;
+unsigned int cmds_started, tgts_started;
+struct nameseq *filenames = 0;
+char *depstr = 0;
+</code></pre>
+<p>These fields represent a partially read rule:</p>
+<table>
+<thead>
+<tr>
+<th>Temporary state</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>filenames</code></td>
+<td>target names waiting to be recorded</td>
+</tr>
+<tr>
+<td><code>depstr</code></td>
+<td>prerequisite text</td>
+</tr>
+<tr>
+<td><code>commands</code></td>
+<td>accumulated recipe text</td>
+</tr>
+<tr>
+<td><code>tgts_started</code></td>
+<td>source line where targets began</td>
+</tr>
+<tr>
+<td><code>cmds_started</code></td>
+<td>source line where the recipe began</td>
+</tr>
+</tbody>
+</table>
+<p>Why delay recording a rule?</p>
+<p>Because a rule can span several lines:</p>
+<pre><code class="language-make">app: main.o util.o
+	$(CC) -o $@ $^
+	@echo built $@
+</code></pre>
+<p>After reading only the first line, Make knows the targets and prerequisites, but it does not yet know all recipe lines. It waits until another non-recipe statement begins, or until end of file.</p>
+<p>The parser uses a local helper macro named <code>record_waiting_files()</code> to commit the pending rule:</p>
+<pre><code class="language-c">record_files (filenames, also_make_targets, pattern,
+              pattern_percent, depstr, cmds_started,
+              commands, commands_idx, two_colon, prefix, &amp;fi);
+</code></pre>
+<p>The actual storage work happens in <code>record_files()</code>.</p>
+<p>This is like collecting a target’s cover sheet, materials list, and work instructions into one folder. Make does not file the folder until it knows the folder is complete.</p>
+<h2>Variable assignments are recognized early</h2>
+<p>Before looking for conditionals or directives, the parser checks whether a line is a variable assignment.</p>
+<pre><code class="language-c">p = parse_var_assignment (p, 0, &amp;vmod);
+if (vmod.assign_v)
+  {
+    ...
+  }
+</code></pre>
+<p>The order matters.</p>
+<p>Imagine this Makefile:</p>
+<pre><code class="language-make">ifdef = not a conditional
+</code></pre>
+<p>The word <code>ifdef</code> normally introduces a conditional, but here it is the name of a variable. If Make looked for conditional keywords first, it would misread the line.</p>
+<p><code>parse_var_assignment()</code> understands modifiers such as:</p>
+<pre><code class="language-make">export PATH = /custom/bin
+override CC = clang
+private TOKEN = secret
+</code></pre>
+<p>It records those modifiers in <code>struct vmodifiers</code>:</p>
+<pre><code class="language-c">struct vmodifiers
+  {
+    unsigned int override_v:1;
+    unsigned int private_v:1;
+    enum variable_export export_v;
+  };
+</code></pre>
+<p>Then Make chooses the assignment’s origin:</p>
+<pre><code class="language-c">enum variable_origin origin =
+  vmod.override_v ? o_override : o_file;
+</code></pre>
+<p>The variable machinery decides how the definition is stored and whether it outranks an existing definition. That authority model belongs to <a href="01_struct_variable.html">struct variable</a>.</p>
+<p>For an ordinary assignment:</p>
+<pre><code class="language-make">MODE := release
+</code></pre>
+<p>the parser eventually calls:</p>
+<pre><code class="language-c">v = try_variable_definition (fstart, p, origin, 0);
+</code></pre>
+<p>That sequence has clear responsibilities:</p>
+<ol>
+<li><code>parse_var_assignment()</code> identifies modifiers and assignment syntax.</li>
+<li><code>try_variable_definition()</code> recognizes the assignment operator.</li>
+<li><code>do_variable_definition()</code> expands or preserves the right-hand side as required.</li>
+<li>the variable table stores the resulting <code>struct variable</code>.</li>
+</ol>
+<p>The parser is the receptionist. It recognizes that the document is a variable form and passes it to the variable department.</p>
+<h2><code>define</code> reads a block, not one line</h2>
+<p>A <code>define</code> directive creates a multiline variable:</p>
+<pre><code class="language-make">define banner
+echo starting build
+echo target is $$@
+endef
+</code></pre>
+<p>The parser recognizes <code>define</code> as a special assignment-style directive, then calls <code>do_define()</code>.</p>
+<pre><code class="language-c">v = do_define (p, origin, ebuf);
+</code></pre>
+<p><code>do_define()</code> keeps reading lines until it sees the matching <code>endef</code>.</p>
+<p>It also tracks nesting:</p>
+<pre><code class="language-c">int nlevels = 1;
+</code></pre>
+<p>So a definition may contain another <code>define</code> block without ending too early.</p>
+<p>This is important because multiline definitions often hold recipe templates:</p>
+<pre><code class="language-make">define compile-template
+$1: $2
+	$(CC) -c $$&lt; -o $$@
+endef
+</code></pre>
+<p>A <code>define</code> is a sealed envelope. Make stores its contents as variable text now; later, <code>$(call ...)</code> and <code>$(eval ...)</code> can open the envelope, fill in arguments, and parse the resulting rule.</p>
+<h2>Conditionals change whether lines are interpreted</h2>
+<p>Consider:</p>
+<pre><code class="language-make">DEBUG = 1
+
+ifeq ($(DEBUG),1)
+CFLAGS = -g
+else
+CFLAGS = -O2
+endif
+</code></pre>
+<p>Make must read every line so it can find matching <code>else</code> and <code>endif</code>, but it should only <em>act on</em> the selected branch.</p>
+<p>The parser tracks this with <code>struct conditionals</code>:</p>
+<pre><code class="language-c">struct conditionals
+  {
+    unsigned int if_cmds;
+    char *ignoring;
+    char *seen_else;
+  };
+</code></pre>
+<p>Think of this as a stack of traffic lights:</p>
+<ul>
+<li>green: interpret this level;</li>
+<li>red: skip this level;</li>
+<li>one stack entry per nested conditional.</li>
+</ul>
+<p>The parser asks <code>conditional_line()</code> whether a line is one of:</p>
+<pre><code class="language-text">ifdef
+ifndef
+ifeq
+ifneq
+else
+endif
+</code></pre>
+<p>When Make is already skipping an outer branch, it does not expand inner conditions. It only tracks nesting so it can stay synchronized.</p>
+<p>That avoids accidental side effects in ignored text:</p>
+<pre><code class="language-make">ifeq (0,1)
+$(shell rm -rf dangerous)
+endif
+</code></pre>
+<p>The skipped branch is not expanded merely to evaluate its inner syntax.</p>
+<p>This is like reading the chapter titles in a sealed appendix only far enough to find the closing divider. You do not perform the instructions inside.</p>
+<p>Included Makefiles receive a separate conditional state. Before reading an include, Make installs a fresh conditional structure:</p>
+<pre><code class="language-c">save = install_conditionals (&amp;new_conditionals);
+</code></pre>
+<p>After the included file finishes, it restores the caller’s conditional context:</p>
+<pre><code class="language-c">restore_conditionals (save);
+</code></pre>
+<p>That prevents an <code>endif</code> in an included Makefile from accidentally closing an <code>if</code> from its parent Makefile.</p>
+<h2><code>include</code> expands names, then recursively parses files</h2>
+<p>An include directive can use variables:</p>
+<pre><code class="language-make">CONFIG = build/config.mk
+include $(CONFIG)
+</code></pre>
+<p>The parser recognizes <code>include</code>, <code>-include</code>, and <code>sinclude</code>. Then it expands the remainder:</p>
+<pre><code class="language-c">p = allocated_variable_expand (p2);
+</code></pre>
+<p>Only after expansion does Make split the result into file names.</p>
+<pre><code class="language-make">include config.mk platform.mk
+</code></pre>
+<p>may therefore include multiple files.</p>
+<p>The parser recursively calls <code>eval_makefile()</code> for each file:</p>
+<pre><code class="language-c">struct goaldep *d = eval_makefile (files-&gt;name, flags);
+d-&gt;floc = *fstart;
+</code></pre>
+<p>The saved <code>floc</code> points back to the include line. That gives Make enough context to report a missing included file in terms of the place that requested it.</p>
+<p>The include variants differ in how missing files are treated:</p>
+<table>
+<thead>
+<tr>
+<th>Directive</th>
+<th>Missing file behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>include file.mk</code></td>
+<td>report an error if Make cannot obtain it</td>
+</tr>
+<tr>
+<td><code>-include file.mk</code></td>
+<td>do not immediately fail</td>
+</tr>
+<tr>
+<td><code>sinclude file.mk</code></td>
+<td>historical alias for <code>-include</code></td>
+</tr>
+</tbody>
+</table>
+<p>A missing <code>-include</code> file may still be considered later as a Makefile that Make can try to rebuild. This behavior is part of the startup and remake process in <code>main.c</code> and <a href="08_update_goal_chain.html">update_goal_chain</a>.</p>
+<p>An include is like inserting another blueprint packet at the current page. Make reads that packet completely, then returns to the next line of the original packet.</p>
+<h2>Rules require a more careful parse</h2>
+<p>A line containing a colon might be a rule:</p>
+<pre><code class="language-make">app: main.o util.o
+</code></pre>
+<p>But it might instead be a target-specific variable assignment:</p>
+<pre><code class="language-make">app: CFLAGS = -g
+</code></pre>
+<p>And on some platforms, a colon may occur in a path. GNU Make cannot simply split every line at the first colon.</p>
+<p>The parser’s strategy is:</p>
+<ol>
+<li>expand enough text to identify targets and the rule separator;</li>
+<li>parse target names;</li>
+<li>inspect text after the colon;</li>
+<li>if the remainder is a variable assignment, record a target-specific variable;</li>
+<li>otherwise treat it as prerequisite text.</li>
+</ol>
+<p>The source comment describes the problem directly:</p>
+<blockquote>
+<p>We can't expand the entire line, since if it's a per-target variable we don't want to expand it.</p>
+</blockquote>
+<p>That timing protects this assignment:</p>
+<pre><code class="language-make">app: CFLAGS = $(DEFAULT_FLAGS)
+</code></pre>
+<p>The right-hand side should become part of the target-specific variable definition. It should not be expanded prematurely as if it were a prerequisite list.</p>
+<p>Once the parser identifies target-specific syntax, it calls:</p>
+<pre><code class="language-c">record_target_var (filenames, p2, origin, &amp;vmod, fstart);
+</code></pre>
+<p>That function gives each target its own variable scope. The resulting lookup behavior is covered in <a href="02_variable_set_list.html">variable_set_list</a>.</p>
+<p>For a normal rule, the parser keeps the prerequisite text and later calls <code>record_files()</code>.</p>
+<h2>Rules become files, dependencies, and commands</h2>
+<p><code>record_files()</code> is where parsed rule text is converted into Make’s internal database.</p>
+<p>A rule such as:</p>
+<pre><code class="language-make">app: main.o util.o
+	$(CC) -o $@ $^
+</code></pre>
+<p>becomes three connected kinds of records:</p>
+<pre><code class="language-text">file record for app
+    ↓
+dependency records for main.o and util.o
+    ↓
+recipe record containing command text
+</code></pre>
+<p>The target itself is represented by <code>struct file</code>, previewed in <a href="02_variable_set_list.html">variable_set_list</a> and examined next in <a href="05_struct_file.html">struct file</a>.</p>
+<p>Its relevant fields are:</p>
+<pre><code class="language-c">struct file
+  {
+    const char *name;
+    struct dep *deps;
+    struct commands *cmds;
+    ...
+  };
+</code></pre>
+<p><code>record_files()</code> creates a recipe object only if recipe text was collected:</p>
+<pre><code class="language-c">cmds-&gt;commands = xstrndup (commands, commands_idx);
+cmds-&gt;recipe_prefix = prefix;
+</code></pre>
+<p>It parses prerequisite text into dependency records:</p>
+<pre><code class="language-c">deps = split_prereqs (depstr);
+</code></pre>
+<p>Then it finds or creates the target’s file record:</p>
+<pre><code class="language-c">f = enter_file (strcache_add (name));
+</code></pre>
+<p>Finally, it attaches the dependency chain and recipe to that file record.</p>
+<p>This is the key handoff:</p>
+<pre><code class="language-text">parser text
+    ↓
+struct file target
+    ↓
+struct dep prerequisites
+    ↓
+struct commands recipe
+</code></pre>
+<p>The parser does not decide whether <code>app</code> is out of date. It only files the construction plan. Later, the dependency engine walks these records to determine what needs rebuilding.</p>
+<h2>Prerequisites are usually expanded while reading</h2>
+<p>For ordinary rules, prerequisite text is expanded during parsing:</p>
+<pre><code class="language-make">SOURCES = main.c util.c
+OBJECTS = $(SOURCES:.c=.o)
+
+app: $(OBJECTS)
+</code></pre>
+<p>By the time Make stores the dependencies, it normally has:</p>
+<pre><code class="language-text">main.o
+util.o
+</code></pre>
+<p>The parser performs that expansion before saving <code>depstr</code>.</p>
+<p>But GNU Make supports a second expansion phase through <code>.SECONDEXPANSION</code>:</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+
+app: $$(objects_for_$@)
+</code></pre>
+<p>The doubled dollar sign delays expansion. During the initial parse, Make stores the prerequisite text for later:</p>
+<pre><code class="language-c">deps-&gt;need_2nd_expansion = 1;
+</code></pre>
+<p>When Make eventually considers the target, it can expand the prerequisites with target-specific and automatic variables available.</p>
+<p>That later stage is implemented in <code>expand_deps()</code> in <code>src/file.c</code>. It initializes target variables, sets automatic variables, and calls:</p>
+<pre><code class="language-c">p = variable_expand_for_file (d-&gt;name, f);
+</code></pre>
+<p>This creates an important timing distinction:</p>
+<table>
+<thead>
+<tr>
+<th>Text location</th>
+<th>Typical expansion time</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>:=</code> right side</td>
+<td>immediately when assigned</td>
+</tr>
+<tr>
+<td>ordinary prerequisites</td>
+<td>while parsing the rule</td>
+</tr>
+<tr>
+<td>second-expanded prerequisites</td>
+<td>while considering the target</td>
+</tr>
+<tr>
+<td>recipe lines</td>
+<td>while preparing the job</td>
+</tr>
+<tr>
+<td><code>$(eval ...)</code> argument</td>
+<td>before generated text is parsed</td>
+</tr>
+</tbody>
+</table>
+<p>The expansion rules themselves belong to <a href="03_variable_expand.html">variable_expand</a>. The parser’s job is to decide which text should be expanded now, saved for later, or treated as raw recipe text.</p>
+<h2>Semicolon recipes are attached immediately</h2>
+<p>Make allows a recipe after a semicolon on the same line:</p>
+<pre><code class="language-make">clean: ; rm -f *.o app
+</code></pre>
+<p>The parser searches for an unescaped semicolon outside variable references. It separates:</p>
+<pre><code class="language-text">target and prerequisites: clean:
+recipe text: rm -f *.o app
+</code></pre>
+<p>Then it adds the recipe text to the same command accumulator used for tab-prefixed recipe lines.</p>
+<p>This means the following forms are structurally similar:</p>
+<pre><code class="language-make">clean:
+	rm -f *.o app
+</code></pre>
+<pre><code class="language-make">clean: ; rm -f *.o app
+</code></pre>
+<p>Both result in a <code>struct file</code> for <code>clean</code> with a <code>struct commands</code> recipe attached.</p>
+<p>The first is usually easier to read. The second is handy for small one-line rules.</p>
+<h2>Special targets affect later parsing</h2>
+<p>Some targets are not ordinary build targets. They change Make’s interpretation rules.</p>
+<p>For example:</p>
+<pre><code class="language-make">.RECIPEPREFIX = &gt;
+</code></pre>
+<p>After this assignment, recipe lines may begin with <code>&gt;</code>:</p>
+<pre><code class="language-make">show:
+&gt;echo hello
+</code></pre>
+<p>The variable system handles the assignment, but <code>set_special_var()</code> immediately updates the parser’s active prefix:</p>
+<pre><code class="language-c">cmd_prefix = var-&gt;value[0] == '\0'
+             ? RECIPEPREFIX_DEFAULT
+             : var-&gt;value[0];
+</code></pre>
+<p>That immediate update is necessary. The parser must know that <code>&gt;</code> starts a recipe before it reads the next line.</p>
+<p>Other special targets are noticed by <code>check_specials()</code>:</p>
+<pre><code class="language-make">.SECONDEXPANSION:
+.ONESHELL:
+.NOTPARALLEL:
+</code></pre>
+<p>For example:</p>
+<pre><code class="language-c">if (!second_expansion &amp;&amp; streq (nm, &quot;.SECONDEXPANSION&quot;))
+  {
+    second_expansion = 1;
+    continue;
+  }
+</code></pre>
+<p>These are like signs posted at a construction site:</p>
+<ul>
+<li><code>.SECONDEXPANSION</code> says, “review some prerequisite lists again later”;</li>
+<li><code>.ONESHELL</code> says, “send an entire recipe to one shell process”;</li>
+<li><code>.NOTPARALLEL</code> says, “do not perform ordinary parallel scheduling.”</li>
+</ul>
+<p>The parser notices the signs early because later lines may need different treatment.</p>
+<h2>What happens when <code>eval</code> creates a rule?</h2>
+<p>Here is a complete small example:</p>
+<pre><code class="language-make">PROGRAMS = hello goodbye
+
+define make-program
+$1: $1.o
+	@echo linking $$@
+endef
+</code></pre>
+<pre><code class="language-make">$(foreach p,$(PROGRAMS),$(eval $(call make-program,$(p))))
+</code></pre>
+<p>The stages are easier to understand when separated.</p>
+<p>First, <code>foreach</code> iterates over <code>hello</code> and <code>goodbye</code>. Its temporary variable scope comes from <a href="02_variable_set_list.html">variable_set_list</a>.</p>
+<p>For the first iteration, <code>call</code> expands the template into text equivalent to:</p>
+<pre><code class="language-make">hello: hello.o
+	@echo linking $@
+</code></pre>
+<p>Then <code>func_eval()</code> calls <code>eval_buffer()</code>.</p>
+<p>The parser sees:</p>
+<ol>
+<li>a rule line, <code>hello: hello.o</code>;</li>
+<li>a tab-prefixed recipe line;</li>
+<li>eventually, the next generated statement or end of buffer;</li>
+<li>a completed rule ready for <code>record_files()</code>.</li>
+</ol>
+<p>The internal database now contains a <code>struct file</code> for <code>hello</code>, a dependency for <code>hello.o</code>, and recipe text containing <code>$@</code>.</p>
+<p>Later, when <code>hello</code> needs rebuilding, Make installs automatic variables and expands the recipe:</p>
+<pre><code class="language-text">@echo linking hello
+</code></pre>
+<p>The parser did not execute <code>echo</code>. It merely stored the text in the right project ledger.</p>
+<h2>The complete path from generated text to a build</h2>
+<pre class="mermaid">sequenceDiagram
+    participant Expand
+    participant Eval
+    participant Parser
+    participant Files
+    participant Build
+    Expand->>Eval: Produce generated makefile text
+    Eval->>Parser: Read the generated logical lines
+    Parser->>Files: Store variables rules and recipes
+    Build->>Files: Read target and dependency records
+    Build->>Expand: Expand recipe for the target
+</pre>
+<p>This diagram shows why <code>eval</code> is more than a fancy string function.</p>
+<p>A normal function such as <code>sort</code> transforms text and returns text. <code>eval</code> transforms text into <strong>database changes</strong>:</p>
+<ul>
+<li>a new variable can become visible;</li>
+<li>a new target can become a possible goal;</li>
+<li>a new dependency can affect rebuild order;</li>
+<li>a new recipe can run later.</li>
+</ul>
+<p>That makes <code>eval</code> one of GNU Make’s most powerful side-effecting functions.</p>
+<h2>The parser cannot safely add rules forever</h2>
+<p>There is one important boundary.</p>
+<p>After Make has finished reading Makefiles, it “snaps” dependency information into a form ready for building. <code>snap_deps()</code> marks this transition:</p>
+<pre><code class="language-c">snapped_deps = 1;
+</code></pre>
+<p>After that point, defining new prerequisite rules is unsafe. <code>record_files()</code> protects the database:</p>
+<pre><code class="language-c">if (snapped_deps)
+  O (fatal, flocp, _(&quot;prerequisites cannot be defined in recipes&quot;));
+</code></pre>
+<p>This usually appears when someone tries to invoke <code>$(eval ...)</code> from a recipe:</p>
+<pre><code class="language-make">bad:
+	$(eval later: ; @echo too late)
+</code></pre>
+<p>By recipe execution time, Make has already built and prepared its dependency graph. Adding a new rule then is like adding a new floor to a building after inspectors have approved the structural plan.</p>
+<p>GNU Make permits <code>eval</code> while Makefiles are being read, where the rule database is still under construction. But it rejects new prerequisites during recipe execution, after the dependency graph has been finalized.</p>
+<h2>Diagnostics inherit the current source location</h2>
+<p>A generated <code>eval</code> string may not have a file name of its own. <code>eval_buffer()</code> chooses its location carefully:</p>
+<pre><code class="language-c">if (flocp)
+  ebuf.floc = *flocp;
+else if (reading_file)
+  ebuf.floc = *reading_file;
+</code></pre>
+<p>If <code>$(eval ...)</code> occurs while Make is reading <code>Makefile</code> line 20, an error in the generated text can usually point back near that location.</p>
+<p>For command-line <code>--eval</code>, there may be no Makefile location at all. In that case, Make creates a neutral location:</p>
+<pre><code class="language-c">ebuf.floc.filenm = NULL;
+ebuf.floc.lineno = 1;
+</code></pre>
+<p>This is not perfect—generated Makefile text does not have a physical line in a file—but it is much better than losing all context.</p>
+<p>When debugging complex generated rules, it often helps to print the generated text before evaluating it:</p>
+<pre><code class="language-make">$(info generated rule follows)
+$(info $(call make-program,hello))
+$(eval $(call make-program,hello))
+</code></pre>
+<p>You can also inspect the resulting internal database:</p>
+<pre><code class="language-sh">make -pn
+</code></pre>
+<p>Then search for the target or variable you expected <code>eval</code> to create.</p>
+<h2>A practical debugging pattern</h2>
+<p>When <code>$(eval ...)</code> misbehaves, inspect each stage separately.</p>
+<p>Start with the template:</p>
+<pre><code class="language-make">define make-rule
+$1: $2
+	@echo target is $$@
+endef
+</code></pre>
+<p>Then inspect the result of <code>call</code>:</p>
+<pre><code class="language-make">$(info $(call make-rule,app,main.o))
+</code></pre>
+<p>Then evaluate it:</p>
+<pre><code class="language-make">$(eval $(call make-rule,app,main.o))
+</code></pre>
+<p>Finally, inspect the stored result:</p>
+<pre><code class="language-sh">make -pn | grep -A4 '^app:'
+</code></pre>
+<p>Ask these questions in order:</p>
+<ol>
+<li><strong>Did the template expand into valid Makefile syntax?</strong></li>
+<li><strong>Did the intended dollar signs survive the first expansion?</strong></li>
+<li><strong>Did <code>eval</code> run while Make was still reading Makefiles?</strong></li>
+<li><strong>Did the parser classify the generated line as a variable, directive, rule, or recipe?</strong></li>
+<li><strong>Did the resulting target and dependencies appear in <code>make -p</code> output?</strong></li>
+</ol>
+<p>This staged approach is much easier than treating <code>eval</code> as mysterious magic.</p>
+<h2>Reading <code>eval</code> in the source</h2>
+<p>When exploring the parser, these landmarks are useful:</p>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Main location</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Where does Make read all primary Makefiles?</td>
+<td><code>read_all_makefiles()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>Where does it open and parse one file?</td>
+<td><code>eval_makefile()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>Where does generated text enter the parser?</td>
+<td><code>eval_buffer()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>Where is the main parser loop?</td>
+<td><code>eval()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>How are recipe lines accumulated?</td>
+<td><code>eval()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>How are variable modifiers recognized?</td>
+<td><code>parse_var_assignment()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>How are <code>define</code> blocks read?</td>
+<td><code>do_define()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>How are conditionals tracked?</td>
+<td><code>conditional_line()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>How are target-specific variables recorded?</td>
+<td><code>record_target_var()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>How are normal rules stored?</td>
+<td><code>record_files()</code> in <code>src/read.c</code></td>
+</tr>
+<tr>
+<td>Where is the <code>$(eval ...)</code> function?</td>
+<td><code>func_eval()</code> in <code>src/function.c</code></td>
+</tr>
+<tr>
+<td>Where are generated prerequisites rejected too late?</td>
+<td><code>record_files()</code> in <code>src/read.c</code></td>
+</tr>
+</tbody>
+</table>
+<p>The most useful orientation question is:</p>
+<blockquote>
+<p>Is Make still interpreting source text, or is it already executing a stored recipe?</p>
+</blockquote>
+<p>If it is still reading source text, <code>eval</code> can add to the construction plan. If it is executing recipes, the dependency graph is already meant to be stable.</p>
+<h2>Key takeaways</h2>
+<p><code>eval()</code> in <code>src/read.c</code> is GNU Make’s central Makefile interpreter.</p>
+<p>It reads logical lines and routes each instruction to the correct subsystem:</p>
+<ul>
+<li>variable assignments go through <code>try_variable_definition()</code>;</li>
+<li><code>define</code> blocks go through <code>do_define()</code>;</li>
+<li>conditionals update a stack of active and ignored branches;</li>
+<li><code>include</code> recursively parses additional Makefiles;</li>
+<li>target-specific assignments go through <code>record_target_var()</code>;</li>
+<li>ordinary rules and recipes go through <code>record_files()</code>;</li>
+<li>target names become <code>struct file</code> records;</li>
+<li>prerequisites become <code>struct dep</code> records;</li>
+<li>command text becomes <code>struct commands</code> data.</li>
+</ul>
+<p>The <code>$(eval ...)</code> function is a bridge from expansion back into parsing:</p>
+<ol>
+<li>expand its argument;</li>
+<li>pass the resulting text to <code>eval_buffer()</code>;</li>
+<li>parse that text with the same machinery used for real Makefiles;</li>
+<li>return the empty string.</li>
+</ol>
+<p>That bridge gives Make metaprogramming power, but it also creates multiple expansion stages. Dollar signs must survive exactly as many stages as necessary.</p>
+<p>Now that we know how Make turns a rule line into a stored target record, the next question is: what exactly lives inside that target record, and how does Make use it to represent a file or build goal? That is the subject of <a href="05_struct_file.html">struct file</a>.</p>
+
+  <nav class="chapter-nav">
+    <span><a href="03_variable_expand.html">&larr; variable_expand</a></span>
+    <span><a href="05_struct_file.html">struct file &rarr;</a></span>
+  </nav>
+</body>
+</html>
